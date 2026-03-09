@@ -1,0 +1,41 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Task {
+  id        String   @id
+  title     String
+  status    String   @default("pending")
+  result    String?
+  pipeline  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  logs      Log[]
+  costs     AgentCost[]
+}
+
+model Log {
+  id        Int      @id @default(autoincrement())
+  taskId    String
+  agent     String
+  type      String
+  message   String
+  createdAt DateTime @default(now())
+  task      Task     @relation(fields: [taskId], references: [id])
+}
+
+model AgentCost {
+  id           Int    @id @default(autoincrement())
+  taskId       String
+  agent        String
+  inputTokens  Int    @default(0)
+  outputTokens Int    @default(0)
+  costUsd      Float  @default(0)
+  task         Task   @relation(fields: [taskId], references: [id])
+  @@unique([taskId, agent])
+}
