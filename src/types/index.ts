@@ -16,6 +16,8 @@ export interface AgentState {
   tokensIn: number
   tokensOut: number
   startedAt: number | null
+  output: string       // full text response
+  files: string[]      // parsed file paths from output
 }
 
 export interface PipelineStep {
@@ -57,7 +59,7 @@ export interface AppState {
   costs: Record<string, CostEntry>
   isRunning: boolean
   taskInput: string
-  tab: 'logs' | 'costs' | 'tasks'
+  tab: 'summary' | 'logs' | 'costs' | 'tasks'
 }
 
 export type AppAction =
@@ -72,5 +74,6 @@ export type AppAction =
   | { type: 'UPDATE_COST'; agent: string; inputTokens: number; outputTokens: number; costUsd: number }
   | { type: 'RESET_AGENTS' }
   | { type: 'SET_TAB'; tab: AppState['tab'] }
+  | { type: 'SET_AGENT_OUTPUT'; id: string; output: string; files: string[] }
   | { type: 'SET_TASK_INPUT'; value: string }
   | { type: 'LOAD_TASKS'; tasks: Task[] }

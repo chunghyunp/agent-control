@@ -21,6 +21,19 @@ const LogViewer = dynamic(() => import('@/components/LogViewer'), { ssr: false }
 const CostBreakdown = dynamic(() => import('@/components/CostBreakdown'), { ssr: false })
 const TaskHistory = dynamic(() => import('@/components/TaskHistory'), { ssr: false })
 const CommandInput = dynamic(() => import('@/components/CommandInput'), { ssr: false })
+const SummaryView = dynamic(() => import('@/components/SummaryView'), { ssr: false })
+
+// ─── FILE PATH PARSER ───────────────────────────────────────────────
+function parseFilePaths(text: string): string[] {
+  const paths = new Set<string>()
+  // **src/foo.tsx** bold filenames with a slash
+  for (const m of text.matchAll(/\*\*([^\s*`]+\.[a-zA-Z]{1,6})\*\*/g))
+    if (m[1].includes('/')) paths.add(m[1])
+  // `src/foo.tsx` backtick filenames with a slash
+  for (const m of text.matchAll(/`([^\s`]+\.[a-zA-Z]{1,6})`/g))
+    if (m[1].includes('/')) paths.add(m[1])
+  return [...paths]
+}
 
 // ─── AGENT DEFINITIONS ──────────────────────────────────────────────
 const AGENTS: AgentDef[] = [
@@ -80,7 +93,7 @@ const AGENTS: AgentDef[] = [
 const initialAgents: Record<string, AgentState> = Object.fromEntries(
   AGENTS.map(a => [
     a.id,
-    { status: 'idle', progress: 0, currentTask: null, tokensIn: 0, tokensOut: 0, startedAt: null },
+    { status: 'idle', progress: 0, currentTask: null, tokensIn: 0, tokensOut: 0, startedAt: null, output: '', files: [] },
   ])
 ) as Record<string, AgentState>
 
@@ -101,7 +114,7 @@ const initialState: AppState = {
   costs: {},
   isRunning: false,
   taskInput: '',
-  tab: 'logs',
+  tab: 'summary',
 }
 
 // ─── REDUCER ────────────────────────────────────────────────────────
@@ -171,13 +184,22 @@ function reducer(state: AppState, action: AppAction): AppState {
         },
       }
 
+    case 'SET_AGENT_OUTPUT':
+      return {
+        ...state,
+        agents: {
+          ...state.agents,
+          [action.id]: { ...state.agents[action.id], output: action.output, files: action.files },
+        },
+      }
+
     case 'RESET_AGENTS':
       return {
         ...state,
         agents: Object.fromEntries(
           AGENTS.map(a => [
             a.id,
-            { ...state.agents[a.id], status: 'idle', progress: 0, currentTask: null, startedAt: null },
+            { ...state.agents[a.id], status: 'idle', progress: 0, currentTask: null, startedAt: null, output: '', files: [] },
           ])
         ) as Record<string, AgentState>,
       }
@@ -302,6 +324,7 @@ async function runPipeline(
 
       clearInterval(progressInterval)
       dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'done', progress: 100 } })
+      dispatch({ type: 'SET_AGENT_OUTPUT', id: agentId, output: text, files: parseFilePaths(text) })
       const cost = await recordCost(agentId, inputTokens, outputTokens, agentDef.model)
       await addLog(agentId, 'success', `Complete — ${inputTokens + outputTokens} tokens ($${cost.toFixed(4)})`)
 
@@ -469,6 +492,7 @@ async function runPipeline(
     body: JSON.stringify({ event: 'task:complete', data: { taskId, title: taskDescription } }),
   }).catch(() => null)
 
+  dispatch({ type: 'SET_TAB', tab: 'summary' })
   dispatch({ type: 'SET_RUNNING', value: false })
 }
 
@@ -639,6 +663,7 @@ export default function App() {
   const doneCount = Object.values(state.agents).filter(a => a.status === 'done').length
   const totalCost = Object.values(state.costs).reduce((s, c) => s + c.costUsd, 0)
   const tabs: Array<{ id: AppState['tab']; label: string; count?: number }> = [
+    { id: 'summary', label: 'Summary' },
     { id: 'logs', label: 'Live Logs', count: state.logs.length },
     { id: 'costs', label: 'Costs' },
     { id: 'tasks', label: 'Tasks', count: state.tasks.length },
@@ -839,10 +864,13 @@ export default function App() {
           <div style={{
             flex: 1,
             overflow: 'hidden',
-            padding: state.tab === 'logs' ? 0 : '14px 16px',
+            padding: state.tab === 'logs' || state.tab === 'summary' ? 0 : '14px 16px',
             display: 'flex',
             flexDirection: 'column',
           }}>
+            {state.tab === 'summary' && (
+              <SummaryView agents={AGENTS} agentStates={state.agents} costs={state.costs} isRunning={state.isRunning} />
+            )}
             {state.tab === 'logs' && (
               <LogViewer logs={state.logs} agents={AGENTS} />
             )}
