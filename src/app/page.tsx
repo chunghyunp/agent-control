@@ -2,7 +2,7 @@
 
 import { useReducer, useEffect, useCallback, useState, useRef } from 'react'
 import dynamic from 'next/dynamic'
-import { AGENT_MODELS, AGENT_SOULS, PRICING } from '@/lib/agents'
+import { AGENT_MODELS, PRICING } from '@/lib/agents'
 import type {
   AgentDef,
   AgentState,
@@ -198,13 +198,13 @@ function reducer(state: AppState, action: AppAction): AppState {
 // ─── SERVER-SIDE AGENT CALLER ────────────────────────────────────────
 async function callAnthropicViaServer(
   model: string,
-  systemPrompt: string,
+  agentId: string,
   userMessage: string
 ): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
   const response = await fetch('/api/agent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ systemPrompt, message: userMessage, model }),
+    body: JSON.stringify({ agentId, message: userMessage, model }),
   })
 
   const data = await response.json() as {
@@ -295,7 +295,7 @@ async function runPipeline(
     try {
       const { text, inputTokens, outputTokens } = await callAnthropicViaServer(
         agentDef.model,
-        AGENT_SOULS[agentId],
+        agentId,
         userMessage
       )
 

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { SOULS } from '@/lib/souls'
 
 export async function POST(req: Request) {
   const apiKey = process.env.ANTHROPIC_API_KEY
@@ -9,7 +10,15 @@ export async function POST(req: Request) {
     )
   }
 
-  const { systemPrompt, message, model } = await req.json()
+  const { agentId, message, model } = await req.json()
+
+  const systemPrompt = SOULS[agentId]
+  if (!systemPrompt) {
+    return NextResponse.json(
+      { error: `Unknown agentId: ${agentId}` },
+      { status: 400 }
+    )
+  }
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
