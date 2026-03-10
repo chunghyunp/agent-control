@@ -39,3 +39,9 @@ model AgentCost {
   task         Task   @relation(fields: [taskId], references: [id])
   @@unique([taskId, agent])
 }
+
+model Settings {
+  id        String   @id @default("default")
+  data      String   // AES-256-GCM encrypted JSON
+  updatedAt DateTime @updatedAt
+}

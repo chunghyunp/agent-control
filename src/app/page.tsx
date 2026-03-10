@@ -2,6 +2,7 @@
 
 import { useReducer, useEffect, useCallback, useState, useRef } from 'react'
 import dynamic from 'next/dynamic'
+import Link from 'next/link'
 import { AGENT_MODELS, PRICING } from '@/lib/agents'
 import type {
   AgentDef,
@@ -712,6 +713,17 @@ export default function App() {
               <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981' }} />
               <span style={{ fontSize: 10, color: '#4b5563' }}>Connected</span>
             </div>
+            <Link
+              href="/settings"
+              title="Settings"
+              style={{
+                display: 'flex', alignItems: 'center',
+                color: '#4b5563', fontSize: 16, textDecoration: 'none',
+                transition: 'color 0.2s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.color = '#a89cf7')}
+              onMouseLeave={e => (e.currentTarget.style.color = '#4b5563')}
+            >⚙️</Link>
             <span style={{
               fontSize: 10.5, color: '#374151',
               fontFamily: '"DM Mono", monospace',
