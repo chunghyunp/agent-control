@@ -8,16 +8,29 @@ interface CommandInputProps {
 }
 
 export default function CommandInput({ onSubmit, isRunning }: CommandInputProps) {
-  const [value, setValue] = useState('')
+  const [text, setText] = useState('')
   const [fileName, setFileName] = useState<string | null>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const [fileContent, setFileContent] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
+  const hasContent = !!text.trim() || !!fileContent
+
   const handleSubmit = () => {
-    if (!value.trim() || isRunning) return
-    onSubmit(value.trim())
-    setValue('')
+    if (!hasContent || isRunning) return
+
+    let message: string
+    if (fileContent && text.trim()) {
+      message = `${fileContent}\n---\n${text.trim()}`
+    } else if (fileContent) {
+      message = fileContent
+    } else {
+      message = text.trim()
+    }
+
+    onSubmit(message)
+    setText('')
     setFileName(null)
+    setFileContent(null)
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -25,69 +38,63 @@ export default function CommandInput({ onSubmit, isRunning }: CommandInputProps)
     if (!file) return
     const reader = new FileReader()
     reader.onload = (ev) => {
-      const text = ev.target?.result as string
-      setValue(text)
+      setFileContent(ev.target?.result as string)
       setFileName(file.name)
-      inputRef.current?.focus()
     }
     reader.readAsText(file)
-    // Reset so the same file can be re-uploaded if needed
     e.target.value = ''
+  }
+
+  const removeFile = () => {
+    setFileName(null)
+    setFileContent(null)
   }
 
   return (
     <div style={{
       display: 'flex',
       flexDirection: 'column',
-      gap: 0,
       borderTop: '1px solid rgba(31,41,55,0.6)',
       background: 'rgba(10,12,22,0.6)',
     }}>
-      {/* File name badge */}
+      {/* File attachment badge */}
       {fileName && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '6px 16px 0',
-        }}>
+        <div style={{ padding: '7px 16px 0' }}>
           <span style={{
-            display: 'flex',
+            display: 'inline-flex',
             alignItems: 'center',
             gap: 5,
-            background: 'rgba(124,110,246,0.15)',
+            background: 'rgba(124,110,246,0.12)',
             border: '1px solid rgba(124,110,246,0.3)',
             borderRadius: 6,
-            padding: '2px 8px',
+            padding: '2px 6px 2px 8px',
             fontSize: 11,
             color: '#a89cf7',
           }}>
             📄 {fileName}
             <button
-              onClick={() => { setValue(''); setFileName(null) }}
+              onClick={removeFile}
+              title="Remove file"
               style={{
                 background: 'none',
                 border: 'none',
                 color: '#6b7280',
                 cursor: 'pointer',
-                padding: '0 0 0 4px',
-                fontSize: 12,
+                padding: '0 2px',
+                fontSize: 13,
                 lineHeight: 1,
+                display: 'flex',
+                alignItems: 'center',
               }}
             >×</button>
           </span>
         </div>
       )}
 
-      <div style={{
-        display: 'flex',
-        gap: 8,
-        padding: '13px 16px',
-      }}>
+      <div style={{ display: 'flex', gap: 8, padding: '13px 16px' }}>
         <div style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 5,
           padding: '0 8px',
           color: '#7c6ef6',
           fontSize: 12,
@@ -97,27 +104,6 @@ export default function CommandInput({ onSubmit, isRunning }: CommandInputProps)
         }}>
           🧠 →
         </div>
-
-        <input
-          ref={inputRef}
-          value={value}
-          onChange={e => setValue(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSubmit()}
-          disabled={isRunning}
-          placeholder={isRunning ? 'Agents working — please wait...' : 'Describe what to build...'}
-          style={{
-            flex: 1,
-            background: 'rgba(17,24,39,0.7)',
-            border: '1px solid rgba(55,65,81,0.5)',
-            borderRadius: 10,
-            padding: '10px 14px',
-            color: '#e5e7eb',
-            fontSize: 12.5,
-            fontFamily: 'inherit',
-            opacity: isRunning ? 0.5 : 1,
-            transition: 'border-color 0.2s, opacity 0.2s',
-          }}
-        />
 
         {/* Hidden file input */}
         <input
@@ -132,38 +118,69 @@ export default function CommandInput({ onSubmit, isRunning }: CommandInputProps)
         <button
           onClick={() => fileRef.current?.click()}
           disabled={isRunning}
-          title="Upload .md spec file"
+          title="Attach .md spec file"
           style={{
-            background: 'rgba(17,24,39,0.7)',
-            border: '1px solid rgba(55,65,81,0.5)',
+            background: fileName
+              ? 'rgba(124,110,246,0.15)'
+              : 'rgba(17,24,39,0.7)',
+            border: fileName
+              ? '1px solid rgba(124,110,246,0.4)'
+              : '1px solid rgba(55,65,81,0.5)',
             borderRadius: 10,
-            padding: '0 14px',
-            color: isRunning ? '#4b5563' : '#9ca3af',
+            padding: '0 12px',
+            color: fileName ? '#a89cf7' : isRunning ? '#4b5563' : '#6b7280',
             fontSize: 15,
             cursor: isRunning ? 'not-allowed' : 'pointer',
             transition: 'all 0.2s',
             display: 'flex',
             alignItems: 'center',
             flexShrink: 0,
+            height: 38,
           }}
         >
           📎
         </button>
 
+        <input
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSubmit()}
+          disabled={isRunning}
+          placeholder={
+            isRunning
+              ? 'Agents working — please wait...'
+              : fileName
+              ? 'Add instructions (optional)...'
+              : 'Describe what to build...'
+          }
+          style={{
+            flex: 1,
+            background: 'rgba(17,24,39,0.7)',
+            border: '1px solid rgba(55,65,81,0.5)',
+            borderRadius: 10,
+            padding: '10px 14px',
+            color: '#e5e7eb',
+            fontSize: 12.5,
+            fontFamily: 'inherit',
+            opacity: isRunning ? 0.5 : 1,
+            transition: 'border-color 0.2s, opacity 0.2s',
+          }}
+        />
+
         <button
           onClick={handleSubmit}
-          disabled={isRunning || !value.trim()}
+          disabled={isRunning || !hasContent}
           style={{
-            background: isRunning || !value.trim()
+            background: isRunning || !hasContent
               ? 'rgba(55,65,81,0.4)'
               : 'linear-gradient(135deg, #7c6ef6, #6358d4)',
             border: 'none',
             borderRadius: 10,
             padding: '0 22px',
-            color: isRunning || !value.trim() ? '#6b7280' : 'white',
+            color: isRunning || !hasContent ? '#6b7280' : 'white',
             fontWeight: 600,
             fontSize: 12,
-            cursor: isRunning ? 'not-allowed' : !value.trim() ? 'not-allowed' : 'pointer',
+            cursor: isRunning || !hasContent ? 'not-allowed' : 'pointer',
             transition: 'all 0.2s',
             fontFamily: 'inherit',
             letterSpacing: '0.02em',
