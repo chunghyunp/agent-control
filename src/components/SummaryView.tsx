@@ -8,6 +8,8 @@ interface SummaryViewProps {
   agentStates: Record<string, AgentState>
   costs: Record<string, CostEntry>
   isRunning: boolean
+  totalExpectedFiles?: number
+  generatedFileCount?: number
 }
 
 const STATUS_STYLE: Record<string, { label: string; color: string; bg: string }> = {
@@ -22,7 +24,7 @@ const STATUS_STYLE: Record<string, { label: string; color: string; bg: string }>
 function fmt(n: number) { return n.toLocaleString() }
 function fmtCost(n: number) { return n < 0.0001 ? '< $0.0001' : `$${n.toFixed(4)}` }
 
-export default function SummaryView({ agents, agentStates, costs, isRunning }: SummaryViewProps) {
+export default function SummaryView({ agents, agentStates, costs, isRunning, totalExpectedFiles = 0, generatedFileCount = 0 }: SummaryViewProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const toggle = (id: string) =>
@@ -32,6 +34,9 @@ export default function SummaryView({ agents, agentStates, costs, isRunning }: S
   const totalTokens = Object.values(costs).reduce((s, c) => s + c.inputTokens + c.outputTokens, 0)
   const totalCost   = Object.values(costs).reduce((s, c) => s + c.costUsd, 0)
   const totalFiles  = Object.values(agentStates).reduce((s, a) => s + a.files.length, 0)
+
+  const showProgress = totalExpectedFiles > 0
+  const progressPct = showProgress ? Math.min(100, Math.round((generatedFileCount / totalExpectedFiles) * 100)) : 0
 
   if (!isRunning && activeAgents.length === 0) {
     return (
@@ -46,6 +51,48 @@ export default function SummaryView({ agents, agentStates, costs, isRunning }: S
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+      {/* Progress bar — shown when file plan is active */}
+      {showProgress && (
+        <div style={{
+          padding: '8px 16px 12px',
+          borderBottom: '1px solid rgba(31,41,55,0.4)',
+        }}>
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 6,
+          }}>
+            <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 500 }}>
+              Files generated
+            </span>
+            <span style={{
+              fontSize: 11,
+              fontFamily: '"DM Mono", monospace',
+              color: progressPct === 100 ? '#10b981' : '#a89cf7',
+              fontWeight: 600,
+            }}>
+              {generatedFileCount}/{totalExpectedFiles} ({progressPct}%)
+            </span>
+          </div>
+          <div style={{
+            height: 4,
+            background: 'rgba(31,41,55,0.6)',
+            borderRadius: 4,
+            overflow: 'hidden',
+          }}>
+            <div style={{
+              height: '100%',
+              width: `${progressPct}%`,
+              background: progressPct === 100
+                ? 'linear-gradient(90deg, #10b981, #34d399)'
+                : 'linear-gradient(90deg, #7c6ef6, #b38cfa)',
+              borderRadius: 4,
+              transition: 'width 0.4s ease',
+            }} />
+          </div>
+        </div>
+      )}
       {/* Agent rows */}
       {agents.map(agent => {
         const st = agentStates[agent.id]

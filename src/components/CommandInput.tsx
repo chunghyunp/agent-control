@@ -7,8 +7,13 @@ interface AttachedFile {
   content: string
 }
 
+interface RepoOverride {
+  owner: string
+  repo: string
+}
+
 interface CommandInputProps {
-  onSubmit: (task: string) => void
+  onSubmit: (task: string, repoOverride?: RepoOverride) => void
   isRunning: boolean
 }
 
@@ -16,6 +21,7 @@ export default function CommandInput({ onSubmit, isRunning }: CommandInputProps)
   const [text, setText] = useState('')
   const [files, setFiles] = useState<AttachedFile[]>([])
   const [dragging, setDragging] = useState(false)
+  const [repoInput, setRepoInput] = useState('') // "owner/repo" format
   const fileRef = useRef<HTMLInputElement>(null)
   const dragCounter = useRef(0)
 
@@ -77,7 +83,16 @@ export default function CommandInput({ onSubmit, isRunning }: CommandInputProps)
     )
     if (text.trim()) parts.push(text.trim())
 
-    onSubmit(parts.join('\n\n'))
+    // Parse owner/repo override
+    let repoOverride: RepoOverride | undefined
+    const trimmed = repoInput.trim()
+    if (trimmed && trimmed.includes('/')) {
+      const [owner, ...rest] = trimmed.split('/')
+      const repo = rest.join('/')
+      if (owner && repo) repoOverride = { owner, repo }
+    }
+
+    onSubmit(parts.join('\n\n'), repoOverride)
     setText('')
     setFiles([])
   }
@@ -114,6 +129,42 @@ export default function CommandInput({ onSubmit, isRunning }: CommandInputProps)
           </span>
         </div>
       )}
+
+      {/* GitHub repo override */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '8px 16px 0',
+      }}>
+        <span style={{ fontSize: 11, color: '#6b7280', flexShrink: 0, fontWeight: 500 }}>
+          📦 Repo:
+        </span>
+        <input
+          value={repoInput}
+          onChange={e => setRepoInput(e.target.value)}
+          disabled={isRunning}
+          placeholder="owner/repo (leave empty for default)"
+          style={{
+            flex: 1,
+            maxWidth: 320,
+            background: 'rgba(17,24,39,0.7)',
+            border: repoInput.trim()
+              ? '1px solid rgba(124,110,246,0.4)'
+              : '1px solid rgba(55,65,81,0.5)',
+            borderRadius: 8,
+            padding: '5px 10px',
+            color: '#e5e7eb',
+            fontSize: 11.5,
+            fontFamily: 'monospace',
+            opacity: isRunning ? 0.5 : 1,
+            transition: 'border-color 0.2s',
+          }}
+        />
+        {repoInput.trim() && (
+          <span style={{ fontSize: 10, color: '#a89cf7', fontStyle: 'italic' }}>
+            overrides settings
+          </span>
+        )}
+      </div>
 
       {/* Attached file badges */}
       {files.length > 0 && (

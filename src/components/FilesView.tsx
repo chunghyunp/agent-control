@@ -5,6 +5,7 @@ import { useState } from 'react'
 interface FilesViewProps {
   files: Record<string, string>
   isRunning: boolean
+  onFileEdit?: (path: string, content: string) => void
 }
 
 // Map file extension to display language
@@ -151,11 +152,10 @@ function TreeRow({ node, depth, selected, onSelect, expandedDirs, toggleDir }: T
   )
 }
 
-export default function FilesView({ files, isRunning }: FilesViewProps) {
+export default function FilesView({ files, isRunning, onFileEdit }: FilesViewProps) {
   const paths = Object.keys(files)
   const [selected, setSelected] = useState<string | null>(paths[0] ?? null)
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => {
-    // Auto-expand top-level directories
     const dirs = new Set<string>()
     for (const p of paths) {
       const parts = p.split('/')
@@ -164,7 +164,9 @@ export default function FilesView({ files, isRunning }: FilesViewProps) {
     return dirs
   })
   const [isPushing, setIsPushing] = useState(false)
-  const [pushStatus, setPushStatus] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [pushStatus, setPushStatus] = useState<{ ok: boolean; msg: string; url?: string } | null>(null)
+  const [isEditing, setIsEditing] = useState(false)
+  const [editContent, setEditContent] = useState('')
 
   const toggleDir = (path: string) => {
     setExpandedDirs(prev => {
@@ -196,7 +198,7 @@ export default function FilesView({ files, isRunning }: FilesViewProps) {
       }
       if (data.ok && !data.skipped) {
         const init = data.isInitialCommit ? ' + scaffolding' : ''
-        setPushStatus({ ok: true, msg: `✓ Pushed ${data.filesCount} files${init} · ${data.commitSha}` })
+        setPushStatus({ ok: true, msg: `✓ Pushed ${data.filesCount} files${init} · ${data.commitSha}`, url: data.commitUrl })
       } else if (data.skipped) {
         setPushStatus({ ok: false, msg: '⚠ No files to push' })
       } else {
@@ -207,6 +209,23 @@ export default function FilesView({ files, isRunning }: FilesViewProps) {
     } finally {
       setIsPushing(false)
     }
+  }
+
+  const startEdit = () => {
+    if (!selected) return
+    setEditContent(files[selected] ?? '')
+    setIsEditing(true)
+  }
+
+  const saveEdit = () => {
+    if (!selected || !onFileEdit) return
+    onFileEdit(selected, editContent)
+    setIsEditing(false)
+  }
+
+  const cancelEdit = () => {
+    setIsEditing(false)
+    setEditContent('')
   }
 
   if (paths.length === 0) {
@@ -270,8 +289,21 @@ export default function FilesView({ files, isRunning }: FilesViewProps) {
             color: pushStatus.ok ? '#10b981' : '#f59e0b',
             borderBottom: '1px solid rgba(31,41,55,0.3)',
             fontFamily: '"DM Mono", monospace',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
           }}>
-            {pushStatus.msg}
+            <span>{pushStatus.msg}</span>
+            {pushStatus.ok && pushStatus.url && (
+              <a
+                href={pushStatus.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: '#a89cf7', textDecoration: 'underline', fontSize: 9.5 }}
+              >
+                View →
+              </a>
+            )}
           </div>
         )}
 
@@ -303,35 +335,106 @@ export default function FilesView({ files, isRunning }: FilesViewProps) {
               padding: '5px 14px',
               borderBottom: '1px solid rgba(31,41,55,0.4)',
               flexShrink: 0,
+              gap: 8,
             }}>
               <span style={{
                 fontSize: 10.5,
                 color: '#9ca3af',
                 fontFamily: '"DM Mono", monospace',
+                flex: 1,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
               }}>
                 {selected}
               </span>
-              <span style={{ fontSize: 9.5, color: '#374151' }}>
-                {selectedContent.split('\n').length} lines · {selectedContent.length} chars
+              <span style={{ fontSize: 9.5, color: '#374151', flexShrink: 0 }}>
+                {selectedContent.split('\n').length}L
               </span>
+              {/* Edit / Save / Cancel buttons */}
+              {!isRunning && onFileEdit && !isEditing && (
+                <button
+                  onClick={startEdit}
+                  style={{
+                    padding: '2px 8px', fontSize: 10,
+                    background: 'rgba(55,65,81,0.4)',
+                    border: '1px solid rgba(55,65,81,0.5)',
+                    borderRadius: 5, color: '#9ca3af',
+                    cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
+                  }}
+                >
+                  Edit
+                </button>
+              )}
+              {isEditing && (
+                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                  <button
+                    onClick={saveEdit}
+                    style={{
+                      padding: '2px 8px', fontSize: 10,
+                      background: 'rgba(16,185,129,0.12)',
+                      border: '1px solid rgba(16,185,129,0.3)',
+                      borderRadius: 5, color: '#10b981',
+                      cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={cancelEdit}
+                    style={{
+                      padding: '2px 8px', fontSize: 10,
+                      background: 'rgba(55,65,81,0.3)',
+                      border: '1px solid rgba(55,65,81,0.4)',
+                      borderRadius: 5, color: '#6b7280',
+                      cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
             </div>
 
-            {/* Code */}
-            <pre style={{
-              flex: 1,
-              margin: 0,
-              padding: '12px 16px',
-              fontSize: 11,
-              lineHeight: 1.65,
-              color: '#d1d5db',
-              fontFamily: '"DM Mono", "Fira Code", monospace',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              overflowY: 'auto',
-              background: 'transparent',
-            }}>
-              {selectedContent}
-            </pre>
+            {/* Code viewer or editor */}
+            {isEditing ? (
+              <textarea
+                value={editContent}
+                onChange={e => setEditContent(e.target.value)}
+                style={{
+                  flex: 1,
+                  margin: 0,
+                  padding: '12px 16px',
+                  fontSize: 11,
+                  lineHeight: 1.65,
+                  color: '#d1d5db',
+                  fontFamily: '"DM Mono", "Fira Code", monospace',
+                  whiteSpace: 'pre',
+                  background: 'rgba(5,8,15,0.4)',
+                  border: 'none',
+                  outline: 'none',
+                  resize: 'none',
+                  overflowY: 'auto',
+                }}
+                spellCheck={false}
+              />
+            ) : (
+              <pre style={{
+                flex: 1,
+                margin: 0,
+                padding: '12px 16px',
+                fontSize: 11,
+                lineHeight: 1.65,
+                color: '#d1d5db',
+                fontFamily: '"DM Mono", "Fira Code", monospace',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                overflowY: 'auto',
+                background: 'transparent',
+              }}>
+                {selectedContent}
+              </pre>
+            )}
           </>
         ) : (
           <div style={{

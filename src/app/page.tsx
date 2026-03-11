@@ -135,6 +135,7 @@ const initialState: AppState = {
   taskInput: '',
   tab: 'summary',
   parsedFiles: {},
+  totalExpectedFiles: 0,
 }
 
 // ─── REDUCER ────────────────────────────────────────────────────────
@@ -230,10 +231,14 @@ function reducer(state: AppState, action: AppAction): AppState {
         },
       }
 
+    case 'SET_TOTAL_EXPECTED':
+      return { ...state, totalExpectedFiles: action.count }
+
     case 'RESET_AGENTS':
       return {
         ...state,
         parsedFiles: {},
+        totalExpectedFiles: 0,
         agents: Object.fromEntries(
           AGENTS.map(a => [
             a.id,
@@ -290,13 +295,270 @@ async function callAnthropicViaServer(
   }
 }
 
+// ─── FILE PLAN HELPERS ────────────────────────────────────────────────
+interface FilePlan {
+  batch: number
+  agent: 'backend' | 'frontend' | 'web3'
+  path: string
+}
+
+interface ReviewResult {
+  approved: boolean
+  missingFiles: string[]
+}
+
+const MAX_FILES_PER_CALL = 4
+
+function parseSupervisorFilePlan(output: string): FilePlan[] {
+  const match = output.match(/FILE_PLAN_START\r?\n([\s\S]*?)FILE_PLAN_END/)
+  if (!match) return []
+  return match[1]
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .map(line => {
+      const firstColon = line.indexOf(':')
+      const secondColon = line.indexOf(':', firstColon + 1)
+      if (firstColon === -1 || secondColon === -1) return null
+      const batch = parseInt(line.slice(0, firstColon), 10)
+      const agent = line.slice(firstColon + 1, secondColon).trim() as FilePlan['agent']
+      const path = line.slice(secondColon + 1).trim()
+      if (isNaN(batch) || !path || !['backend', 'frontend', 'web3'].includes(agent)) return null
+      return { batch, agent, path }
+    })
+    .filter((x): x is FilePlan => x !== null)
+}
+
+function parseReviewResult(output: string): ReviewResult {
+  const resultMatch = output.match(/REVIEW_RESULT_START\r?\n([\s\S]*?)REVIEW_RESULT_END/)
+  const missingMatch = output.match(/MISSING_FILES_START\r?\n([\s\S]*?)MISSING_FILES_END/)
+
+  let approved: boolean
+  if (resultMatch) {
+    approved = /Status:\s*APPROVED/i.test(resultMatch[1])
+  } else {
+    const hasRejected = /\bREJECTED\b/i.test(output)
+    const hasApproved = /Status:\s*APPROVED/i.test(output)
+    approved = hasApproved && !hasRejected
+  }
+
+  const missingFiles = missingMatch
+    ? missingMatch[1].trim().split('\n').map(l => l.trim()).filter(l => l.length > 0 && !l.startsWith('#'))
+    : []
+
+  return { approved, missingFiles }
+}
+
+function buildSupervisorPrompt(taskDescription: string): string {
+  return `You are the Supervisor. Analyze this task and output a Canonical Spec + FILE_PLAN.
+
+TASK: ${taskDescription}
+
+After your spec, you MUST output a complete FILE_PLAN listing EVERY file the complete app needs.
+
+FILE_PLAN FORMAT (use EXACTLY this):
+FILE_PLAN_START
+1:backend:package.json
+1:backend:tsconfig.json
+2:backend:lib/db.ts
+3:backend:app/api/health/route.ts
+4:frontend:types/index.ts
+5:frontend:components/Button.tsx
+6:frontend:app/page.tsx
+FILE_PLAN_END
+
+BATCH ORDER (assign each file to the right batch):
+Batch 1 = Backend config: package.json, tsconfig.json, next.config.js, tailwind.config.ts, postcss.config.js, .env.example, .gitignore, railway.json, prisma/schema.prisma
+Batch 2 = Backend lib: all lib/*.ts files (db.ts, auth.ts, storage.ts, etc.)
+Batch 3 = Backend API: all app/api/**/route.ts files
+Batch 4 = Frontend types + hooks: types/*.ts, hooks/*.ts
+Batch 5 = Frontend components: components/**/*.tsx
+Batch 6 = Frontend pages: app/layout.tsx, app/page.tsx, app/*/page.tsx
+Batch 7 = Web3: contracts/*.sol, web3 hooks (only if this task needs blockchain)
+
+RULES:
+- Include EVERY file the complete app needs — do NOT omit config files
+- Assign backend, frontend, or web3 (lowercase)
+- File paths must be exact (no leading slashes)
+- The FILE_PLAN must be complete — the agents will ONLY generate files listed here
+- Typical Next.js app has 25-50 files total
+
+Output your Canonical Spec first, then the FILE_PLAN_START...FILE_PLAN_END block at the very end.`
+}
+
+function buildBatchPrompt(
+  agentId: string,
+  taskDescription: string,
+  filePaths: string[],
+  supervisorPlan: string,
+  generatedFilePaths: string[],
+): string {
+  const agentRole = agentId === 'frontend' ? 'Frontend (React/TypeScript/Tailwind)'
+    : agentId === 'backend' ? 'Backend (Next.js API Routes/Prisma/Node.js)'
+    : 'Web3 (Solidity/Foundry)'
+
+  return `You are the ${agentRole} specialist.
+
+TASK: ${taskDescription}
+
+SUPERVISOR PLAN:
+${supervisorPlan.slice(0, 3000)}
+
+YOUR ASSIGNMENT — Generate these ${filePaths.length} file${filePaths.length !== 1 ? 's' : ''} with complete, production-ready code:
+${filePaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}
+
+Already generated files (for context, do NOT regenerate these):
+${generatedFilePaths.length > 0 ? generatedFilePaths.join('\n') : 'None yet'}
+
+CRITICAL OUTPUT FORMAT — Every file MUST use this EXACT format:
+
+--- FILE: path/to/file.ext ---
+\`\`\`typescript
+// complete code here
+\`\`\`
+--- END FILE ---
+
+RULES:
+- Output ALL ${filePaths.length} file${filePaths.length !== 1 ? 's' : ''} listed above
+- No placeholder code, no TODOs, no "implement later" — complete working code only
+- Each file MUST be wrapped in --- FILE: path --- and --- END FILE --- delimiters
+- Use the exact file paths from the list above
+- Match the tech stack and patterns from the supervisor plan`
+}
+
+function buildFormatReminderPrompt(
+  agentId: string,
+  taskDescription: string,
+  filePaths: string[],
+  prevOutput: string,
+): string {
+  return `RETRY — Your previous output did not use the required file format.
+
+You are the ${agentId} specialist for task: ${taskDescription}
+
+You must generate these files: ${filePaths.join(', ')}
+
+Your previous output (excerpt):
+${prevOutput.slice(0, 400)}
+
+The output did not contain valid --- FILE: --- blocks. You MUST use this EXACT format for EVERY file:
+
+--- FILE: ${filePaths[0] || 'path/to/file.ts'} ---
+\`\`\`typescript
+// your complete code here
+\`\`\`
+--- END FILE ---
+
+Now generate ALL ${filePaths.length} file${filePaths.length !== 1 ? 's' : ''} using this exact format. No prose, no explanations — just the FILE blocks.`
+}
+
+function buildReviewerPrompt(
+  taskDescription: string,
+  supervisorPlan: string,
+  filePlan: FilePlan[],
+  generatedFiles: Record<string, string>,
+): string {
+  const expectedPaths = filePlan.map(f => f.path)
+  const generatedPaths = Object.keys(generatedFiles)
+  const missingPaths = expectedPaths.filter(p => !generatedPaths.includes(p))
+
+  const fileContentsPreview = generatedPaths.slice(0, 20).map(path => {
+    const content = generatedFiles[path] ?? ''
+    const preview = content.slice(0, 400)
+    return `=== ${path} (${content.split('\n').length} lines) ===\n${preview}${content.length > 400 ? '\n...(truncated)' : ''}`
+  }).join('\n\n')
+
+  return `You are the Reviewer. Verify completeness and code quality.
+
+TASK: ${taskDescription}
+
+EXPECTED FILES (${expectedPaths.length} total):
+${expectedPaths.map(p => `- ${p}`).join('\n')}
+
+GENERATED FILES (${generatedPaths.length} total):
+${generatedPaths.map(p => `- ${p}`).join('\n')}
+
+${missingPaths.length > 0 ? `MISSING FILES (${missingPaths.length}):
+${missingPaths.map(p => `- ${p}`).join('\n')}` : 'No missing files detected.'}
+
+GENERATED FILE CONTENTS (preview):
+${fileContentsPreview}
+
+COMPLETENESS VERIFICATION:
+- Expected: ${expectedPaths.length} files
+- Generated: ${generatedPaths.length} files
+- Missing: ${missingPaths.length} files
+
+DECISION RULES:
+- If ANY expected file is missing → Status: REJECTED
+- If any file has only placeholder/stub code (empty functions, TODO comments only) → Status: REJECTED
+- Only approve if ALL files are present AND have real implementations
+
+OUTPUT THIS EXACT FORMAT:
+
+REVIEW_RESULT_START
+Status: APPROVED
+Expected: ${expectedPaths.length}
+Generated: ${generatedPaths.length}
+Missing: ${missingPaths.length}
+REVIEW_RESULT_END
+
+MISSING_FILES_START
+${missingPaths.join('\n') || '(none)'}
+MISSING_FILES_END
+
+Findings:
+[List any code quality issues, interface mismatches, or security concerns]
+
+CRITICAL: Status MUST be REJECTED if Missing > 0. Never approve incomplete work.`
+}
+
+function buildMissingFilesPrompt(
+  agentId: string,
+  taskDescription: string,
+  missingFiles: string[],
+  supervisorPlan: string,
+  existingFilePaths: string[],
+): string {
+  return `You are the ${agentId} specialist. The Reviewer rejected the work — these files are missing:
+
+${missingFiles.map((f, i) => `${i + 1}. ${f}`).join('\n')}
+
+TASK: ${taskDescription}
+
+SUPERVISOR PLAN (summary):
+${supervisorPlan.slice(0, 2000)}
+
+Files already generated (do NOT regenerate):
+${existingFilePaths.join('\n')}
+
+Generate ONLY the ${missingFiles.length} missing file${missingFiles.length !== 1 ? 's' : ''} listed above.
+
+Use this EXACT format for each file:
+
+--- FILE: path/to/file.ext ---
+\`\`\`typescript
+// complete production-ready code
+\`\`\`
+--- END FILE ---
+
+No placeholders. No TODOs. Complete working implementations only.`
+}
+
 // ─── ORCHESTRATION ENGINE ────────────────────────────────────────────
+interface RepoOverride {
+  owner: string
+  repo: string
+}
+
 async function runPipeline(
   taskDescription: string,
-  dispatch: React.Dispatch<AppAction>
+  dispatch: React.Dispatch<AppAction>,
+  repoOverride?: RepoOverride,
 ) {
   dispatch({ type: 'SET_RUNNING', value: true })
   dispatch({ type: 'RESET_AGENTS' })
+  dispatch({ type: 'MERGE_PARSED_FILES', files: {} }) // Reset files
 
   const taskId = String(Date.now())
   const now = new Date().toLocaleTimeString('en', { hour12: false })
@@ -325,7 +587,7 @@ async function runPipeline(
     agent: string,
     inputTokens: number,
     outputTokens: number,
-    model: string
+    model: string,
   ) => {
     const pricing = PRICING[model] ?? { input: 3, output: 15 }
     const costUsd = (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output
@@ -339,31 +601,32 @@ async function runPipeline(
     return costUsd
   }
 
+  // Collect all agent text outputs for the GitHub push at the end
+  const allAgentOutputs: string[] = []
+
   const callAgent = async (
     agentId: string,
-    userMessage: string
+    userMessage: string,
   ): Promise<{ text: string; error?: string }> => {
     const agentDef = AGENTS.find(a => a.id === agentId)!
-    dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'working', startedAt: Date.now(), progress: 0 } })
-    await addLog(agentId, 'info', 'Starting work...')
+    dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'working', startedAt: Date.now(), progress: 10 } })
 
-    let progress = 0
+    let progress = 10
     const progressInterval = setInterval(() => {
-      progress = Math.min(92, progress + Math.floor(Math.random() * 10) + 3)
+      progress = Math.min(90, progress + Math.floor(Math.random() * 8) + 2)
       dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { progress } })
-    }, 1800)
+    }, 2000)
 
     try {
       const { text, inputTokens, outputTokens } = await callAnthropicViaServer(
         agentDef.model,
         agentId,
-        userMessage
+        userMessage,
       )
 
       clearInterval(progressInterval)
       dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'done', progress: 100 } })
 
-      // Parse structured file blocks (new format) and merge into global parsedFiles
       const fileContents = parseFileContents(text)
       const fileKeys = Object.keys(fileContents)
       if (fileKeys.length > 0) {
@@ -377,15 +640,19 @@ async function runPipeline(
       })
 
       const cost = await recordCost(agentId, inputTokens, outputTokens, agentDef.model)
-      const filesGenerated = Object.keys(fileContents).length
-      const filesSuffix = filesGenerated > 0 ? ` — ${filesGenerated} files` : ''
-      await addLog(agentId, 'success', `Complete${filesSuffix} · ${inputTokens + outputTokens} tokens ($${cost.toFixed(4)})`)
+      const filesGenerated = fileKeys.length
+      const filesSuffix = filesGenerated > 0 ? ` — ${filesGenerated} file${filesGenerated !== 1 ? 's' : ''}` : ''
+      await addLog(agentId, 'success', `Complete${filesSuffix} · ${(inputTokens + outputTokens).toLocaleString()} tokens ($${cost.toFixed(4)})`)
 
       await fetch('/api/emit', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ event: 'agent:done', data: { taskId, agentId, inputTokens, outputTokens } }),
       }).catch(() => null)
+
+      if (text.trim().length > 0) {
+        allAgentOutputs.push(text)
+      }
 
       return { text }
     } catch (err) {
@@ -397,22 +664,19 @@ async function runPipeline(
     }
   }
 
-  // ── STEP 1: Supervisor planning ──────────────────────────────────
+  // ── PHASE 1: Supervisor → Canonical Spec + FILE_PLAN ─────────────
   dispatch({
     type: 'SET_PIPELINE',
     pipeline: [
       { id: 'plan', label: 'Planning', agent: 'supervisor', status: 'working' },
-      { id: 'implement', label: 'Implement', agent: 'frontend', status: 'idle' },
+      { id: 'implement', label: 'Implement', agent: 'backend', status: 'idle' },
       { id: 'review', label: 'Review', agent: 'reviewer', status: 'idle' },
       { id: 'deliver', label: 'Deliver', agent: 'supervisor', status: 'idle' },
     ],
   })
 
-  await addLog('supervisor', 'delegate', `New task: "${taskDescription}"`)
-  const planResult = await callAgent(
-    'supervisor',
-    `Analyze this task and output a plan with task_type and agent delegation:\n\n${taskDescription}`
-  )
+  await addLog('supervisor', 'delegate', `New task: "${taskDescription.slice(0, 80)}"`)
+  const planResult = await callAgent('supervisor', buildSupervisorPrompt(taskDescription))
 
   if (planResult.error) {
     dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'error' } })
@@ -422,121 +686,233 @@ async function runPipeline(
 
   dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'plan', data: { status: 'done' } })
 
-  // ── STEP 2: Determine which agents to activate ───────────────────
-  const lower = taskDescription.toLowerCase()
-  const needsWeb3 = /contract|token|staking|erc|solidity|web3|blockchain|nft|defi/.test(lower)
-  const needsFrontend = /page|ui|component|frontend|dashboard|form|button|display|react|tsx/.test(lower)
-  const needsBackend = /api|server|database|endpoint|auth|backend|deploy|docker|prisma|express/.test(lower)
-
-  const agentsToRun: string[] = []
-  if (needsWeb3) agentsToRun.push('web3')
-  if (needsBackend || !needsFrontend) agentsToRun.push('backend')
-  if (needsFrontend || !needsBackend) agentsToRun.push('frontend')
-  if (agentsToRun.length === 0) agentsToRun.push('backend', 'frontend')
-
-  const dynamicPipeline: PipelineStep[] = [
-    { id: 'plan', label: 'Plan', agent: 'supervisor', status: 'done' },
-    ...agentsToRun.map(id => ({
-      id,
-      label: AGENTS.find(a => a.id === id)!.name,
-      agent: id,
-      status: 'working' as const,
-    })),
-    { id: 'review', label: 'Review', agent: 'reviewer', status: 'waiting' },
-    { id: 'deliver', label: 'Deliver', agent: 'supervisor', status: 'idle' },
-  ]
-  dispatch({ type: 'SET_PIPELINE', pipeline: dynamicPipeline })
-
-  await fetch('/api/emit', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ event: 'pipeline:update', data: { taskId, pipeline: dynamicPipeline } }),
-  }).catch(() => null)
-
-  await fetch('/api/tasks/' + taskId, {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ pipeline: JSON.stringify(dynamicPipeline) }),
-  }).catch(() => null)
-
-  agentsToRun.forEach(id => {
-    dispatch({ type: 'UPDATE_AGENT', id, data: { status: 'waiting', currentTask: taskDescription } })
-  })
-  dispatch({ type: 'UPDATE_AGENT', id: 'reviewer', data: { status: 'waiting' } })
-
-  // ── STEP 3: Run implementation agents in parallel ────────────────
   const supervisorPlan = planResult.text
-  const implPromises = agentsToRun.map(async agentId => {
-    await addLog('supervisor', 'delegate', `→ ${agentId}: Implement ${agentId} portion`)
-    const prompt = `The Supervisor has planned this task:\n---\n${supervisorPlan}\n---\n\nYour specific job: Implement the ${agentId} portion of:\n"${taskDescription}"\n\nOutput production-ready code with explicit file paths.`
-    const result = await callAgent(agentId, prompt)
-    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: agentId, data: { status: result.error ? 'error' : 'done' } })
-    return { agentId, result }
-  })
+  const filePlan = parseSupervisorFilePlan(supervisorPlan)
+  const totalExpected = filePlan.length
 
-  const implResults = await Promise.all(implPromises)
+  dispatch({ type: 'SET_TOTAL_EXPECTED', count: totalExpected })
 
-  // ── STEP 4: Reviewer ─────────────────────────────────────────────
-  dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'review', data: { status: 'working' } })
-  dispatch({ type: 'UPDATE_AGENT', id: 'reviewer', data: { status: 'reviewing' } })
+  if (totalExpected === 0) {
+    await addLog('supervisor', 'warn', 'No FILE_PLAN found — falling back to keyword-based delegation')
+    // Fallback: keyword detection
+    const lower = taskDescription.toLowerCase()
+    const needsWeb3 = /contract|token|staking|erc|solidity|web3|blockchain|nft|defi/.test(lower)
+    const needsFrontend = /page|ui|component|frontend|dashboard|form|button|display|react|tsx/.test(lower)
+    const needsBackend = /api|server|database|endpoint|auth|backend|deploy|docker|prisma|express/.test(lower)
+    const agentsToRun: string[] = []
+    if (needsWeb3) agentsToRun.push('web3')
+    if (needsBackend || !needsFrontend) agentsToRun.push('backend')
+    if (needsFrontend || !needsBackend) agentsToRun.push('frontend')
+    if (agentsToRun.length === 0) agentsToRun.push('backend', 'frontend')
 
-  const reviewInput = implResults
-    .map(({ agentId, result }) =>
-      `=== ${agentId.toUpperCase()} OUTPUT ===\n${result.text || result.error || 'No output'}\n`
-    )
-    .join('\n')
+    const fallbackPromises = agentsToRun.map(async agentId => {
+      await addLog('supervisor', 'delegate', `→ ${agentId}: Implement ${agentId} portion`)
+      const prompt = `Supervisor plan:\n${supervisorPlan}\n\nImplement the ${agentId} portion of: "${taskDescription}"\n\nOutput ALL files using this format:\n--- FILE: path/to/file.ext ---\n\`\`\`typescript\ncode\n\`\`\`\n--- END FILE ---`
+      return callAgent(agentId, prompt)
+    })
+    await Promise.all(fallbackPromises)
+  } else {
+    await addLog('supervisor', 'info', `FILE_PLAN: ${totalExpected} files across ${new Set(filePlan.map(f => f.batch)).size} batches`)
 
-  await addLog('supervisor', 'delegate', `→ reviewer: Review all ${implResults.length} outputs`)
-  const reviewResult = await callAgent(
-    'reviewer',
-    `Review these agent outputs for the task: "${taskDescription}"\n\n${reviewInput}`
-  )
+    // ── PHASE 2: Multi-round batch implementation ─────────────────
+    const generatedFiles: Record<string, string> = {}
 
-  dispatch({
-    type: 'UPDATE_PIPELINE_STEP',
-    stepId: 'review',
-    data: { status: reviewResult.error ? 'error' : 'done' },
-  })
-
-  // ── STEP 5: Retry loop for CRITICAL/HIGH issues ──────────────────
-  if (reviewResult.text && !reviewResult.error) {
-    const hasCritical = /🔴\s*CRITICAL/i.test(reviewResult.text)
-    const hasHigh = /🟠\s*HIGH/i.test(reviewResult.text)
-
-    if (hasCritical || hasHigh) {
-      await addLog('reviewer', 'warn', 'CRITICAL/HIGH issues found — triggering retry for flagged agents')
-
-      const flaggedAgents = agentsToRun.filter(id => {
-        const agentDef = AGENTS.find(a => a.id === id)!
-        return reviewResult.text.toLowerCase().includes(id.toLowerCase()) ||
-               reviewResult.text.toLowerCase().includes(agentDef.name.toLowerCase())
-      })
-
-      const retryTargets = flaggedAgents.length > 0 ? flaggedAgents : agentsToRun
-
-      const retryPromises = retryTargets.map(async agentId => {
-        await addLog('supervisor', 'delegate', `→ ${agentId}: Retry with reviewer feedback`)
-        const prompt = `You previously wrote code for this task:\n"${taskDescription}"\n\nThe reviewer found these issues:\n${reviewResult.text}\n\nPlease revise your implementation to fix ALL CRITICAL and HIGH severity issues.\nOutput the complete corrected code using the FILE OUTPUT FORMAT:\n--- FILE: path/to/file.ext ---\n\`\`\`lang\ncode\n\`\`\`\n--- END FILE ---`
-        return callAgent(agentId, prompt)
-      })
-
-      await Promise.all(retryPromises)
-      await addLog('reviewer', 'info', 'Retry complete — finalizing')
+    // Group files by batch number
+    const batchMap = new Map<number, FilePlan[]>()
+    for (const file of filePlan) {
+      const batch = batchMap.get(file.batch) ?? []
+      batch.push(file)
+      batchMap.set(file.batch, batch)
     }
+
+    const sortedBatches = [...batchMap.entries()].sort((a, b) => a[0] - b[0])
+
+    // Update pipeline to show all unique agents
+    const uniqueAgents = [...new Set(filePlan.map(f => f.agent))]
+    const dynamicPipeline = [
+      { id: 'plan', label: 'Plan', agent: 'supervisor', status: 'done' as const },
+      ...uniqueAgents.map(id => ({
+        id,
+        label: AGENTS.find(a => a.id === id)?.name ?? id,
+        agent: id,
+        status: 'waiting' as const,
+      })),
+      { id: 'review', label: 'Review', agent: 'reviewer', status: 'waiting' as const },
+      { id: 'deliver', label: 'Deliver', agent: 'supervisor', status: 'idle' as const },
+    ]
+    dispatch({ type: 'SET_PIPELINE', pipeline: dynamicPipeline })
+
+    for (const [batchNum, batchFiles] of sortedBatches) {
+      // Group by agent within this batch
+      const agentMap = new Map<string, FilePlan[]>()
+      for (const file of batchFiles) {
+        const list = agentMap.get(file.agent) ?? []
+        list.push(file)
+        agentMap.set(file.agent, list)
+      }
+
+      // Run each agent in this batch (parallel across agents within the same batch)
+      const agentResults = await Promise.all([...agentMap.entries()].map(async ([agentId, agentFiles]) => {
+        dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: agentId, data: { status: 'working' } })
+        const agentNewFiles: Record<string, string> = {}
+
+        // Split into sub-batches of MAX_FILES_PER_CALL
+        for (let i = 0; i < agentFiles.length; i += MAX_FILES_PER_CALL) {
+          const subBatch = agentFiles.slice(i, i + MAX_FILES_PER_CALL)
+          const filePaths = subBatch.map((f: FilePlan) => f.path)
+          const subBatchLabel = `batch ${batchNum}${agentFiles.length > MAX_FILES_PER_CALL ? ` (${Math.floor(i / MAX_FILES_PER_CALL) + 1}/${Math.ceil(agentFiles.length / MAX_FILES_PER_CALL)})` : ''}`
+
+          await addLog(
+            'supervisor',
+            'delegate',
+            `→ ${agentId}: ${subBatchLabel} — ${filePaths.join(', ')}`,
+          )
+
+          const prompt = buildBatchPrompt(
+            agentId,
+            taskDescription,
+            filePaths,
+            supervisorPlan,
+            Object.keys(generatedFiles),
+          )
+
+          const result = await callAgent(agentId, prompt)
+
+          // Verify format compliance
+          const parsed = parseFileContents(result.text)
+          if (Object.keys(parsed).length === 0 && result.text.trim().length > 100) {
+            await addLog(agentId, 'warn', `File format not followed for ${subBatchLabel} — retrying`)
+            const retryPrompt = buildFormatReminderPrompt(agentId, taskDescription, filePaths, result.text)
+            const retryResult = await callAgent(agentId, retryPrompt)
+            Object.assign(agentNewFiles, parseFileContents(retryResult.text))
+          } else {
+            Object.assign(agentNewFiles, parsed)
+          }
+        }
+
+        dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: agentId, data: { status: 'done' } })
+        return agentNewFiles
+      }))
+
+      // Merge all agent results after parallel execution completes (no race condition)
+      for (const newFiles of agentResults) {
+        Object.assign(generatedFiles, newFiles)
+      }
+      dispatch({ type: 'MERGE_PARSED_FILES', files: generatedFiles })
+
+      // Log progress after each batch
+      const done = Object.keys(generatedFiles).length
+      const pct = totalExpected > 0 ? Math.round((done / totalExpected) * 100) : 0
+      await addLog('system', 'info', `Files: ${done}/${totalExpected} (${pct}%)`)
+    }
+
+    // ── PHASE 3: Reviewer completeness check (max 2 cycles) ──────
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'review', data: { status: 'working' } })
+    dispatch({ type: 'UPDATE_AGENT', id: 'reviewer', data: { status: 'reviewing' } })
+
+    let reviewCycle = 0
+    const MAX_REVIEW_CYCLES = 2
+    let finalApproved = false
+
+    while (reviewCycle < MAX_REVIEW_CYCLES) {
+      const currentGenerated = Object.keys(generatedFiles)
+      await addLog(
+        'supervisor',
+        'delegate',
+        `→ reviewer: Cycle ${reviewCycle + 1} — checking ${currentGenerated.length}/${totalExpected} files`,
+      )
+
+      const reviewPrompt = buildReviewerPrompt(
+        taskDescription,
+        supervisorPlan,
+        filePlan,
+        generatedFiles,
+      )
+
+      const reviewResult = await callAgent('reviewer', reviewPrompt)
+      const { approved, missingFiles } = parseReviewResult(reviewResult.text)
+
+      if (approved) {
+        await addLog('reviewer', 'success', `APPROVED — ${currentGenerated.length}/${totalExpected} files verified`)
+        finalApproved = true
+        break
+      }
+
+      // Reviewer rejected
+      const actualMissing = missingFiles.filter(f => !generatedFiles[f])
+      const missing = actualMissing.length > 0
+        ? actualMissing
+        : filePlan.map(f => f.path).filter(p => !generatedFiles[p])
+
+      await addLog(
+        'reviewer',
+        'warn',
+        `REJECTED (cycle ${reviewCycle + 1}/${MAX_REVIEW_CYCLES}) — ${missing.length} files missing: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}`,
+      )
+
+      if (missing.length === 0) {
+        if (reviewCycle === MAX_REVIEW_CYCLES - 1) {
+          await addLog('reviewer', 'warn', 'Max cycles reached — proceeding with current files')
+          break
+        }
+      }
+
+      if (reviewCycle === MAX_REVIEW_CYCLES - 1) {
+        await addLog('reviewer', 'warn', `Max review cycles (${MAX_REVIEW_CYCLES}) reached — proceeding`)
+        break
+      }
+
+      // Re-delegate missing files to their assigned agents
+      if (missing.length > 0) {
+        const missingByAgent = new Map<string, string[]>()
+        for (const path of missing) {
+          const planned = filePlan.find(f => f.path === path)
+          const agentId = planned?.agent ?? 'backend'
+          const list = missingByAgent.get(agentId) ?? []
+          list.push(path)
+          missingByAgent.set(agentId, list)
+        }
+
+        await Promise.all([...missingByAgent.entries()].map(async ([agentId, files]) => {
+          await addLog('supervisor', 'delegate', `→ ${agentId}: Generate ${files.length} missing files`)
+          const prompt = buildMissingFilesPrompt(
+            agentId,
+            taskDescription,
+            files,
+            supervisorPlan,
+            Object.keys(generatedFiles),
+          )
+          const result = await callAgent(agentId, prompt)
+          Object.assign(generatedFiles, parseFileContents(result.text))
+          dispatch({ type: 'MERGE_PARSED_FILES', files: generatedFiles })
+        }))
+
+        const newDone = Object.keys(generatedFiles).length
+        const newPct = totalExpected > 0 ? Math.round((newDone / totalExpected) * 100) : 0
+        await addLog('system', 'info', `Files after revision: ${newDone}/${totalExpected} (${newPct}%)`)
+      }
+
+      reviewCycle++
+    }
+
+    dispatch({
+      type: 'UPDATE_PIPELINE_STEP',
+      stepId: 'review',
+      data: { status: finalApproved ? 'done' : 'error' },
+    })
   }
 
-  // ── STEP 6: Deliver ──────────────────────────────────────────────
+  // ── PHASE 4: Deliver ──────────────────────────────────────────
   dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: 'done' } })
   dispatch({ type: 'UPDATE_AGENT', id: 'supervisor', data: { status: 'done' } })
 
-  const finalResult = reviewResult.text || implResults.map(r => r.result.text).join('\n\n')
-  dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'completed', result: finalResult } })
-  await addLog('supervisor', 'success', `Task complete: "${taskDescription}"`)
+  dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'completed', result: `Generated ${totalExpected} files` } })
+  await addLog('supervisor', 'success', `Task complete — ${totalExpected} files generated`)
 
   await fetch('/api/tasks/' + taskId, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ status: 'completed', result: finalResult }),
+    body: JSON.stringify({ status: 'completed', result: planResult.text.slice(0, 2000) }),
   }).catch(() => null)
 
   await fetch('/api/emit', {
@@ -545,51 +921,41 @@ async function runPipeline(
     body: JSON.stringify({ event: 'task:complete', data: { taskId, title: taskDescription } }),
   }).catch(() => null)
 
-  // ── AUTO-PUSH: Send all outputs to GitHub ────────────────────────
+  // ── AUTO-PUSH: Send all generated files to GitHub ────────────────────
   try {
-    const allOutputs = [
-      planResult.text,
-      ...implResults.map(r => r.result.text),
-      reviewResult.text,
-    ].filter(Boolean)
+    await addLog('supervisor', 'info', `Pushing code to GitHub…`)
+    const pushRes = await fetch('/api/github/push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rawOutputs: allAgentOutputs,
+        message: `feat: ${taskDescription.slice(0, 72)}`,
+        ...(repoOverride && { owner: repoOverride.owner, repo: repoOverride.repo }),
+      }),
+    })
+    const pushData = await pushRes.json() as {
+      ok: boolean
+      skipped?: boolean
+      filesCount?: number
+      agentFilesCount?: number
+      commitSha?: string
+      commitUrl?: string
+      isInitialCommit?: boolean
+      error?: string
+    }
 
-    if (allOutputs.length > 0) {
-      await addLog('supervisor', 'info', '📦 Pushing code to GitHub…')
-      const pushRes = await fetch('/api/github/push', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          rawOutputs: allOutputs,
-          message: `feat: ${taskDescription.slice(0, 72)}`,
-        }),
-      })
-      const pushData = await pushRes.json() as {
-        ok: boolean
-        skipped?: boolean
-        filesCount?: number
-        agentFilesCount?: number
-        commitSha?: string
-        commitUrl?: string
-        isInitialCommit?: boolean
-        error?: string
-      }
-
-      if (pushData.ok && !pushData.skipped) {
-        const initNote = pushData.isInitialCommit ? ' (initial commit + scaffolding)' : ''
-        const agentNote = pushData.agentFilesCount
-          ? ` (${pushData.agentFilesCount} agent-generated)`
-          : ''
-        await addLog(
-          'supervisor',
-          'success',
-          `Pushed ${pushData.filesCount} files${initNote}${agentNote} · ${pushData.commitSha} — ${pushData.commitUrl}`,
-        )
-        await addLog('supervisor', 'info', '🚀 Railway will auto-deploy in ~2 minutes')
-      } else if (pushData.skipped) {
-        await addLog('supervisor', 'info', 'GitHub push skipped — no agent files and repo already initialized')
-      } else {
-        await addLog('supervisor', 'warn', `GitHub push failed: ${pushData.error}`)
-      }
+    if (pushData.ok && !pushData.skipped) {
+      const initNote = pushData.isInitialCommit ? ' (initial commit + scaffolding)' : ''
+      await addLog(
+        'supervisor',
+        'success',
+        `Pushed ${pushData.filesCount} files${initNote} · ${pushData.commitSha} — ${pushData.commitUrl}`,
+      )
+      await addLog('supervisor', 'info', 'Railway will auto-deploy in ~2 minutes')
+    } else if (pushData.skipped) {
+      await addLog('supervisor', 'info', 'GitHub push skipped — no files and repo already initialized')
+    } else {
+      await addLog('supervisor', 'warn', `GitHub push failed: ${pushData.error}`)
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -752,9 +1118,9 @@ export default function App() {
   }, [])
 
   const handleSubmit = useCallback(
-    async (taskDesc: string) => {
+    async (taskDesc: string, repoOverride?: RepoOverride) => {
       if (state.isRunning) return
-      await runPipeline(taskDesc, dispatch)
+      await runPipeline(taskDesc, dispatch, repoOverride)
     },
     [state.isRunning]
   )
@@ -1047,13 +1413,26 @@ export default function App() {
             flexDirection: 'column',
           }}>
             {state.tab === 'summary' && (
-              <SummaryView agents={AGENTS} agentStates={state.agents} costs={state.costs} isRunning={state.isRunning} />
+              <SummaryView
+                agents={AGENTS}
+                agentStates={state.agents}
+                costs={state.costs}
+                isRunning={state.isRunning}
+                totalExpectedFiles={state.totalExpectedFiles}
+                generatedFileCount={Object.keys(state.parsedFiles).length}
+              />
             )}
             {state.tab === 'logs' && (
               <LogViewer logs={state.logs} agents={AGENTS} />
             )}
             {state.tab === 'files' && (
-              <FilesView files={state.parsedFiles} isRunning={state.isRunning} />
+              <FilesView
+                files={state.parsedFiles}
+                isRunning={state.isRunning}
+                onFileEdit={(path, content) =>
+                  dispatch({ type: 'MERGE_PARSED_FILES', files: { [path]: content } })
+                }
+              />
             )}
             {state.tab === 'costs' && (
               <CostBreakdown agentDefs={AGENTS} agentStates={state.agents} />

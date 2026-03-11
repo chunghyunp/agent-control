@@ -17,6 +17,9 @@ export async function POST(req: Request) {
     // Option B: pre-parsed files (from Files tab manual push)
     files?: { path: string; content: string }[]
     message: string
+    // Optional per-project repo override
+    owner?: string
+    repo?: string
   }
 
   // Build deduplicated file map from agent outputs (last write wins per path)
@@ -34,9 +37,12 @@ export async function POST(req: Request) {
     agentFiles.set(f.path, f.content)
   }
 
-  // Check GitHub config before doing anything else
+  // Check GitHub config — per-project override takes priority
   const settings = await loadSettings()
-  const { token, owner, repo, branch } = settings.github
+  const token = settings.github.token
+  const owner = body.owner || settings.github.owner
+  const repo = body.repo || settings.github.repo
+  const branch = settings.github.branch
 
   if (!token || !owner || !repo) {
     return NextResponse.json(

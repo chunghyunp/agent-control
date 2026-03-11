@@ -61,6 +61,7 @@ export interface AppState {
   taskInput: string
   tab: 'summary' | 'logs' | 'files' | 'costs' | 'tasks'
   parsedFiles: Record<string, string>  // path -> content, merged across all agents
+  totalExpectedFiles: number
 }
 
 export type AppAction =
@@ -80,3 +81,4 @@ export type AppAction =
   | { type: 'MERGE_PARSED_FILES'; files: Record<string, string> }
   | { type: 'SET_TASK_INPUT'; value: string }
   | { type: 'LOAD_TASKS'; tasks: Task[] }
+  | { type: 'SET_TOTAL_EXPECTED'; count: number }
