@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { loadSettings } from '@/lib/settings-store'
-import { pushFiles } from '@/lib/github'
+import { pushFiles, parseFilesFromOutput, isRepoEmpty, getScaffoldingFiles } from '@/lib/github'
 
 function checkAuth(req: Request): boolean {
   const expected = process.env.DASHBOARD_PASSWORD
@@ -11,23 +11,85 @@ function checkAuth(req: Request): boolean {
 export async function POST(req: Request) {
   if (!checkAuth(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { files, message } = await req.json() as {
-    files: { path: string; content: string }[]
+  const body = await req.json() as {
+    // Option A: raw agent output strings (server parses them)
+    rawOutputs?: string[]
+    // Option B: pre-parsed files (from Files tab manual push)
+    files?: { path: string; content: string }[]
     message: string
   }
 
+  // Build deduplicated file map from agent outputs (last write wins per path)
+  const agentFiles = new Map<string, string>()
+
+  // From raw agent outputs
+  for (const output of body.rawOutputs ?? []) {
+    for (const file of parseFilesFromOutput(output)) {
+      agentFiles.set(file.path, file.content)
+    }
+  }
+
+  // From pre-parsed files
+  for (const f of body.files ?? []) {
+    agentFiles.set(f.path, f.content)
+  }
+
+  // Check GitHub config before doing anything else
   const settings = await loadSettings()
   const { token, owner, repo, branch } = settings.github
 
   if (!token || !owner || !repo) {
-    return NextResponse.json({ error: 'GitHub not configured in Settings' }, { status: 400 })
+    return NextResponse.json(
+      { ok: false, error: 'GitHub not configured in Settings' },
+      { status: 400 },
+    )
   }
 
+  const targetBranch = branch || 'main'
+
   try {
-    const result = await pushFiles(token, owner, repo, branch || 'main', files, message)
-    return NextResponse.json({ ok: true, ...result })
+    const empty = await isRepoEmpty(token, owner, repo, targetBranch)
+
+    // If repo is not empty and agents produced no files, nothing to push
+    if (!empty && agentFiles.size === 0) {
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+        message: 'No parseable file blocks found in agent output',
+      })
+    }
+
+    const allFiles = new Map<string, string>()
+
+    if (empty) {
+      // Scaffolding first — agent files override conflicting paths
+      for (const f of getScaffoldingFiles(repo)) {
+        allFiles.set(f.path, f.content)
+      }
+    }
+
+    // Agent-generated files override scaffolding
+    agentFiles.forEach((content, path) => allFiles.set(path, content))
+
+    const filesToPush = Array.from(allFiles.entries()).map(([path, content]) => ({ path, content }))
+
+    const commitMessage = empty
+      ? `chore: initial commit — ${body.message}`
+      : body.message
+
+    const result = await pushFiles(token, owner, repo, targetBranch, filesToPush, commitMessage)
+
+    return NextResponse.json({
+      ok: true,
+      filesCount: result.filesCount,
+      commitSha: result.commitSha,
+      commitUrl: result.commitUrl,
+      isInitialCommit: empty,
+      agentFilesCount: agentFiles.size,
+    })
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'Push failed'
+    console.error('[github/push]', e)
     return NextResponse.json({ ok: false, error: msg }, { status: 500 })
   }
 }

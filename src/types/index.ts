@@ -59,13 +59,15 @@ export interface AppState {
   costs: Record<string, CostEntry>
   isRunning: boolean
   taskInput: string
-  tab: 'summary' | 'logs' | 'costs' | 'tasks'
+  tab: 'summary' | 'logs' | 'files' | 'costs' | 'tasks'
+  parsedFiles: Record<string, string>  // path -> content, merged across all agents
 }
 
 export type AppAction =
   | { type: 'SET_AGENT_STATUS'; id: string; status: AgentState['status'] }
   | { type: 'UPDATE_AGENT'; id: string; data: Partial<AgentState> }
   | { type: 'ADD_LOG'; log: Omit<LogEntry, 'ts'> & { ts?: number } }
+  | { type: 'ADD_LOG_DEDUP'; log: Omit<LogEntry, 'ts'> & { ts?: number } }
   | { type: 'ADD_TASK'; task: Task }
   | { type: 'UPDATE_TASK'; id: string; data: Partial<Task> }
   | { type: 'SET_PIPELINE'; pipeline: PipelineStep[] }
@@ -75,5 +77,6 @@ export type AppAction =
   | { type: 'RESET_AGENTS' }
   | { type: 'SET_TAB'; tab: AppState['tab'] }
   | { type: 'SET_AGENT_OUTPUT'; id: string; output: string; files: string[] }
+  | { type: 'MERGE_PARSED_FILES'; files: Record<string, string> }
   | { type: 'SET_TASK_INPUT'; value: string }
   | { type: 'LOAD_TASKS'; tasks: Task[] }

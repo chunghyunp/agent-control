@@ -22,17 +22,36 @@ const CostBreakdown = dynamic(() => import('@/components/CostBreakdown'), { ssr:
 const TaskHistory = dynamic(() => import('@/components/TaskHistory'), { ssr: false })
 const CommandInput = dynamic(() => import('@/components/CommandInput'), { ssr: false })
 const SummaryView = dynamic(() => import('@/components/SummaryView'), { ssr: false })
+const FilesView = dynamic(() => import('@/components/FilesView'), { ssr: false })
 
-// ─── FILE PATH PARSER ───────────────────────────────────────────────
+// ─── FILE PARSERS ────────────────────────────────────────────────────
+/** Extract path → content from --- FILE: --- blocks (new format) */
+function parseFileContents(text: string): Record<string, string> {
+  const files: Record<string, string> = {}
+  const pattern =
+    /^---\s*FILE:\s*(\S+)\s*---[ \t]*\r?\n```[^\n]*\r?\n([\s\S]*?)```[ \t]*\r?\n---\s*END FILE\s*---/gm
+  let m: RegExpExecArray | null
+  while ((m = pattern.exec(text)) !== null) {
+    files[m[1].trim()] = m[2]
+  }
+  return files
+}
+
+/** Extract file paths only (for display when content not available) */
 function parseFilePaths(text: string): string[] {
-  const paths = new Set<string>()
-  // **src/foo.tsx** bold filenames with a slash
-  for (const m of text.matchAll(/\*\*([^\s*`]+\.[a-zA-Z]{1,6})\*\*/g))
-    if (m[1].includes('/')) paths.add(m[1])
-  // `src/foo.tsx` backtick filenames with a slash
-  for (const m of text.matchAll(/`([^\s`]+\.[a-zA-Z]{1,6})`/g))
-    if (m[1].includes('/')) paths.add(m[1])
-  return [...paths]
+  // Try new format first
+  const newFmt: string[] = []
+  const pat = /^---\s*FILE:\s*(\S+)\s*---/gm
+  let m: RegExpExecArray | null
+  while ((m = pat.exec(text)) !== null) newFmt.push(m[1].trim())
+  if (newFmt.length > 0) return newFmt
+  // Fallback: **bold** or `backtick` filenames
+  const paths: string[] = []
+  const boldPat = /\*\*([^\s*`]+\.[a-zA-Z]{1,6})\*\*/g
+  while ((m = boldPat.exec(text)) !== null) if (m[1].includes('/') && !paths.includes(m[1])) paths.push(m[1])
+  const btPat = /`([^\s`]+\.[a-zA-Z]{1,6})`/g
+  while ((m = btPat.exec(text)) !== null) if (m[1].includes('/') && !paths.includes(m[1])) paths.push(m[1])
+  return paths
 }
 
 // ─── AGENT DEFINITIONS ──────────────────────────────────────────────
@@ -115,6 +134,7 @@ const initialState: AppState = {
   isRunning: false,
   taskInput: '',
   tab: 'summary',
+  parsedFiles: {},
 }
 
 // ─── REDUCER ────────────────────────────────────────────────────────
@@ -142,6 +162,23 @@ function reducer(state: AppState, action: AppAction): AppState {
       const log: LogEntry = { ts: Date.now(), id: Date.now() + Math.random(), ...action.log }
       return { ...state, logs: [...state.logs, log] }
     }
+
+    case 'ADD_LOG_DEDUP': {
+      const log: LogEntry = { ts: Date.now(), id: Date.now() + Math.random(), ...action.log }
+      // Skip if same agent + message was already added within the last 2 seconds
+      const recent = state.logs.slice(-30)
+      const isDup = recent.some(
+        l =>
+          l.agent === log.agent &&
+          l.message === log.message &&
+          Math.abs((l.ts ?? 0) - (log.ts ?? Date.now())) < 2000,
+      )
+      if (isDup) return state
+      return { ...state, logs: [...state.logs, log] }
+    }
+
+    case 'MERGE_PARSED_FILES':
+      return { ...state, parsedFiles: { ...state.parsedFiles, ...action.files } }
 
     case 'ADD_TASK':
       return {
@@ -196,6 +233,7 @@ function reducer(state: AppState, action: AppAction): AppState {
     case 'RESET_AGENTS':
       return {
         ...state,
+        parsedFiles: {},
         agents: Object.fromEntries(
           AGENTS.map(a => [
             a.id,
@@ -324,9 +362,24 @@ async function runPipeline(
 
       clearInterval(progressInterval)
       dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'done', progress: 100 } })
-      dispatch({ type: 'SET_AGENT_OUTPUT', id: agentId, output: text, files: parseFilePaths(text) })
+
+      // Parse structured file blocks (new format) and merge into global parsedFiles
+      const fileContents = parseFileContents(text)
+      const fileKeys = Object.keys(fileContents)
+      if (fileKeys.length > 0) {
+        dispatch({ type: 'MERGE_PARSED_FILES', files: fileContents })
+      }
+      dispatch({
+        type: 'SET_AGENT_OUTPUT',
+        id: agentId,
+        output: text,
+        files: fileKeys.length > 0 ? fileKeys : parseFilePaths(text),
+      })
+
       const cost = await recordCost(agentId, inputTokens, outputTokens, agentDef.model)
-      await addLog(agentId, 'success', `Complete — ${inputTokens + outputTokens} tokens ($${cost.toFixed(4)})`)
+      const filesGenerated = Object.keys(fileContents).length
+      const filesSuffix = filesGenerated > 0 ? ` — ${filesGenerated} files` : ''
+      await addLog(agentId, 'success', `Complete${filesSuffix} · ${inputTokens + outputTokens} tokens ($${cost.toFixed(4)})`)
 
       await fetch('/api/emit', {
         method: 'POST',
@@ -463,7 +516,7 @@ async function runPipeline(
 
       const retryPromises = retryTargets.map(async agentId => {
         await addLog('supervisor', 'delegate', `→ ${agentId}: Retry with reviewer feedback`)
-        const prompt = `You previously wrote code for this task:\n"${taskDescription}"\n\nThe reviewer found these issues:\n${reviewResult.text}\n\nPlease revise your implementation to fix ALL CRITICAL and HIGH severity issues. Output the complete corrected code with file paths.`
+        const prompt = `You previously wrote code for this task:\n"${taskDescription}"\n\nThe reviewer found these issues:\n${reviewResult.text}\n\nPlease revise your implementation to fix ALL CRITICAL and HIGH severity issues.\nOutput the complete corrected code using the FILE OUTPUT FORMAT:\n--- FILE: path/to/file.ext ---\n\`\`\`lang\ncode\n\`\`\`\n--- END FILE ---`
         return callAgent(agentId, prompt)
       })
 
@@ -491,6 +544,57 @@ async function runPipeline(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ event: 'task:complete', data: { taskId, title: taskDescription } }),
   }).catch(() => null)
+
+  // ── AUTO-PUSH: Send all outputs to GitHub ────────────────────────
+  try {
+    const allOutputs = [
+      planResult.text,
+      ...implResults.map(r => r.result.text),
+      reviewResult.text,
+    ].filter(Boolean)
+
+    if (allOutputs.length > 0) {
+      await addLog('supervisor', 'info', '📦 Pushing code to GitHub…')
+      const pushRes = await fetch('/api/github/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rawOutputs: allOutputs,
+          message: `feat: ${taskDescription.slice(0, 72)}`,
+        }),
+      })
+      const pushData = await pushRes.json() as {
+        ok: boolean
+        skipped?: boolean
+        filesCount?: number
+        agentFilesCount?: number
+        commitSha?: string
+        commitUrl?: string
+        isInitialCommit?: boolean
+        error?: string
+      }
+
+      if (pushData.ok && !pushData.skipped) {
+        const initNote = pushData.isInitialCommit ? ' (initial commit + scaffolding)' : ''
+        const agentNote = pushData.agentFilesCount
+          ? ` (${pushData.agentFilesCount} agent-generated)`
+          : ''
+        await addLog(
+          'supervisor',
+          'success',
+          `Pushed ${pushData.filesCount} files${initNote}${agentNote} · ${pushData.commitSha} — ${pushData.commitUrl}`,
+        )
+        await addLog('supervisor', 'info', '🚀 Railway will auto-deploy in ~2 minutes')
+      } else if (pushData.skipped) {
+        await addLog('supervisor', 'info', 'GitHub push skipped — no agent files and repo already initialized')
+      } else {
+        await addLog('supervisor', 'warn', `GitHub push failed: ${pushData.error}`)
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    await addLog('supervisor', 'warn', `GitHub push failed: ${msg}`)
+  }
 
   dispatch({ type: 'SET_TAB', tab: 'summary' })
   dispatch({ type: 'SET_RUNNING', value: false })
@@ -555,6 +659,7 @@ export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const [now, setNow] = useState(() => new Date())
   const [keyMissing, setKeyMissing] = useState(false)
+  const [isPushing, setIsPushing] = useState(false)
   const socketRef = useRef<import('socket.io-client').Socket | null>(null)
 
   // Clock
@@ -626,7 +731,8 @@ export default function App() {
       })
 
       socket.on('log', (data: { agent: string; type: LogEntry['type']; message: string; ts?: number }) => {
-        dispatch({ type: 'ADD_LOG', log: { ...data, ts: data.ts ?? Date.now() } })
+        // Use dedup action to prevent double-logging (addLog dispatches locally AND server re-emits via socket)
+        dispatch({ type: 'ADD_LOG_DEDUP', log: { ...data, ts: data.ts ?? Date.now() } })
       })
 
       socket.on('task:complete', (data: { taskId: string; title: string }) => {
@@ -653,6 +759,48 @@ export default function App() {
     [state.isRunning]
   )
 
+  const handleManualPush = useCallback(async () => {
+    const fileEntries = Object.entries(state.parsedFiles)
+    if (fileEntries.length === 0) {
+      // Fallback: use raw agent outputs if parsedFiles is empty
+      const outputs = Object.values(state.agents).map(a => a.output).filter(Boolean)
+      if (outputs.length === 0) return
+    }
+    setIsPushing(true)
+    dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'info', message: 'Manual GitHub push triggered…' } })
+    try {
+      const taskTitle = state.tasks[0]?.title ?? 'manual push'
+      const body = fileEntries.length > 0
+        ? { files: fileEntries.map(([path, content]) => ({ path, content })), message: `feat: ${taskTitle.slice(0, 72)}` }
+        : { rawOutputs: Object.values(state.agents).map(a => a.output).filter(Boolean), message: `feat: ${taskTitle.slice(0, 72)}` }
+
+      const res = await fetch('/api/github/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json() as {
+        ok: boolean; skipped?: boolean; filesCount?: number
+        commitSha?: string; commitUrl?: string; error?: string; isInitialCommit?: boolean
+      }
+      if (data.ok && !data.skipped) {
+        const initNote = data.isInitialCommit ? ' (initial commit with scaffolding)' : ''
+        dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'success', message: `Pushed ${data.filesCount} files${initNote} · ${data.commitSha} — ${data.commitUrl}` } })
+        dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'info', message: '🚀 Railway will auto-deploy in ~2 minutes' } })
+        dispatch({ type: 'SET_TAB', tab: 'logs' })
+      } else if (data.skipped) {
+        dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'info', message: 'GitHub push: no file blocks detected in output' } })
+      } else {
+        dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'error', message: `GitHub push failed: ${data.error}` } })
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown'
+      dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'error', message: `GitHub push error: ${msg}` } })
+    } finally {
+      setIsPushing(false)
+    }
+  }, [state.parsedFiles, state.agents, state.tasks])
+
   // ── Missing key screen ───────────────────────────────────────────
   if (keyMissing) {
     return <MissingKeyBanner />
@@ -662,9 +810,11 @@ export default function App() {
   const activeCount = Object.values(state.agents).filter(a => a.status === 'working').length
   const doneCount = Object.values(state.agents).filter(a => a.status === 'done').length
   const totalCost = Object.values(state.costs).reduce((s, c) => s + c.costUsd, 0)
+  const fileCount = Object.keys(state.parsedFiles).length
   const tabs: Array<{ id: AppState['tab']; label: string; count?: number }> = [
     { id: 'summary', label: 'Summary' },
     { id: 'logs', label: 'Live Logs', count: state.logs.length },
+    { id: 'files', label: 'Files', count: fileCount > 0 ? fileCount : undefined },
     { id: 'costs', label: 'Costs' },
     { id: 'tasks', label: 'Tasks', count: state.tasks.length },
   ]
@@ -738,6 +888,34 @@ export default function App() {
               <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981' }} />
               <span style={{ fontSize: 10, color: '#4b5563' }}>Connected</span>
             </div>
+            {doneCount > 0 && !state.isRunning && (
+              <button
+                onClick={handleManualPush}
+                disabled={isPushing}
+                title="Push latest agent output to GitHub"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '5px 12px',
+                  background: isPushing ? 'rgba(55,65,81,0.4)' : 'rgba(16,185,129,0.08)',
+                  border: `1px solid ${isPushing ? 'rgba(55,65,81,0.4)' : 'rgba(16,185,129,0.2)'}`,
+                  borderRadius: 8,
+                  color: isPushing ? '#4b5563' : '#10b981',
+                  fontSize: 10.5, fontWeight: 500,
+                  cursor: isPushing ? 'not-allowed' : 'pointer',
+                  fontFamily: 'inherit',
+                  transition: 'all 0.2s',
+                }}
+              >
+                {isPushing ? (
+                  <>
+                    <div style={{ width: 8, height: 8, border: '1.5px solid #4b5563', borderTopColor: '#6b7280', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                    Pushing…
+                  </>
+                ) : (
+                  '⬆ Push to GitHub'
+                )}
+              </button>
+            )}
             <Link
               href="/settings"
               title="Settings"
@@ -864,7 +1042,7 @@ export default function App() {
           <div style={{
             flex: 1,
             overflow: 'hidden',
-            padding: state.tab === 'logs' || state.tab === 'summary' ? 0 : '14px 16px',
+            padding: state.tab === 'logs' || state.tab === 'summary' || state.tab === 'files' ? 0 : '14px 16px',
             display: 'flex',
             flexDirection: 'column',
           }}>
@@ -873,6 +1051,9 @@ export default function App() {
             )}
             {state.tab === 'logs' && (
               <LogViewer logs={state.logs} agents={AGENTS} />
+            )}
+            {state.tab === 'files' && (
+              <FilesView files={state.parsedFiles} isRunning={state.isRunning} />
             )}
             {state.tab === 'costs' && (
               <CostBreakdown agentDefs={AGENTS} agentStates={state.agents} />
