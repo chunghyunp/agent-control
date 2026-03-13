@@ -129,3 +129,93 @@ Rules:
 - Each file gets its own FILE / END FILE block
 - List multiple files sequentially with no extra text between blocks
 - If you revise a file, output the full revised file in a new FILE / END FILE block
+
+---
+
+## DESIGN SYSTEM — FACIALDNA AI
+
+### Brand Identity
+FacialDNA AI is a premium Web3 AI face generation dApp.
+Aesthetic: futuristic biotech meets luxury digital identity.
+Think: high-end DNA testing lab in a cyberpunk world.
+
+### Color System (CSS Variables)
+--bg-primary: #080b14 (deep navy black)
+--bg-secondary: #0d1117 (slightly lighter dark)
+--bg-card: #111827 (card surfaces)
+--accent-cyan: #00e5cc (bioluminescent teal — primary accent)
+--accent-gold: #c9a84c (warm gold — premium touches)
+--accent-cyan-glow: rgba(0, 229, 204, 0.15) (subtle glow)
+--text-primary: #f0f0f0 (main text)
+--text-secondary: #6b7280 (muted text)
+--text-accent: #00e5cc (highlighted text)
+--border: rgba(255, 255, 255, 0.06) (subtle borders)
+--glass: rgba(255, 255, 255, 0.03) (glass surfaces)
+
+DO NOT USE: purple gradients, white backgrounds, generic blue, bright green, red as primary color.
+
+### Typography
+- Headings: Clash Display or Satoshi (import from Google Fonts)
+- Body: Plus Jakarta Sans or General Sans
+- Data/stats: JetBrains Mono or DM Mono
+- NEVER use: Inter, Roboto, Arial, system-ui as primary font
+- Font sizes: use Tailwind scale (text-xs through text-6xl)
+
+### Component Style Rules
+- Cards: bg-[#111827] with border border-white/5, rounded-2xl
+- Glass effect: backdrop-blur-xl bg-white/[0.03]
+- Buttons primary: bg-[#00e5cc] text-black font-bold hover:bg-[#00d4bc] rounded-xl
+- Buttons secondary: border border-white/10 bg-white/5 hover:bg-white/10 rounded-xl
+- Inputs: bg-white/5 border border-white/10 rounded-xl focus:border-[#00e5cc] focus:ring-1 focus:ring-[#00e5cc]/20
+- Hover states on everything — nothing should feel dead
+- Transitions: transition-all duration-200
+
+### Animation Rules
+- Page load: stagger child elements with animation-delay
+- Cards: subtle hover:scale-[1.02] hover:-translate-y-1
+- Buttons: hover:scale-[1.02] active:scale-[0.98]
+- Loading: pulse or shimmer animation, NOT a basic spinner
+- Generation loading: particle assembly or scan-line effect
+- Result reveal: blur-to-focus transition
+- Use framer-motion for complex animations
+- CSS transitions for simple hover/focus states
+
+### Layout Rules
+- Max content width: max-w-7xl mx-auto
+- Page padding: px-4 sm:px-6 lg:px-8
+- Card gaps: gap-4 or gap-6
+- Sections: py-8 or py-12
+- Mobile first: design for 375px, scale up
+- All touch targets: minimum 44x44px
+- No horizontal scroll on any viewport
+
+### Dark Theme Rules
+- NEVER use white or light backgrounds
+- All surfaces are dark with subtle variation
+- Text hierarchy through opacity, not color change
+- Borders are barely visible (white/5 or white/10)
+- Accent color used sparingly — for CTAs and highlights only
+- Shadows: use colored glow instead of black shadows (shadow-[0_0_30px_rgba(0,229,204,0.1)])
+
+### What Makes It Premium
+- Generous whitespace — don't cram elements
+- Consistent border radius (rounded-xl or rounded-2xl)
+- Subtle gradients on surfaces (not flat colors)
+- Micro-interactions on every interactive element
+- Loading skeletons instead of spinners
+- Empty states with illustrations, not just text
+- Error states that are helpful, not alarming
+- Smooth page transitions
+
+### Mobile Specific
+- Bottom navigation bar with glass effect
+- Full-width cards with no side margins on small screens
+- Larger touch targets (48px minimum on mobile)
+- Swipe gestures where appropriate (gallery, history)
+- No hover-dependent interactions on mobile
+
+### Common Mistakes to AVOID
+- Generic dark mode (boring flat dark gray)
+- Purple/blue gradient backgrounds (overused AI aesthetic)
+- Tiny text or buttons on mobile
+- No loading states
