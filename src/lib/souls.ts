@@ -10,6 +10,7 @@ function load(filename: string): string {
 // Loaded once at server startup — never re-read per request
 export const SOULS: Record<string, string> = {
   supervisor: load('supervisor-system.md'),
+  designer:   load('designer-system.md'),
   frontend:   load('frontend-system.md'),
   backend:    load('backend-system.md'),
   web3:       load('web3-system.md'),

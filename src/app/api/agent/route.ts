@@ -3,6 +3,7 @@ import { SOULS } from '@/lib/souls'
 
 const AGENT_MAX_TOKENS: Record<string, number> = {
   supervisor: 8000,
+  designer: 8000,
   frontend: 32000,
   backend: 32000,
   web3: 32000,

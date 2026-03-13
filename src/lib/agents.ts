@@ -1,6 +1,7 @@
 // ─── AGENT MODELS ───────────────────────────────────────────────────
 export const AGENT_MODELS: Record<string, string> = {
   supervisor: 'claude-sonnet-4-6',
+  designer: 'claude-sonnet-4-6',
   frontend: 'claude-sonnet-4-6',
   backend: 'claude-sonnet-4-6',
   web3: 'claude-opus-4-6',

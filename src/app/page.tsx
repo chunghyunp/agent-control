@@ -67,6 +67,16 @@ const AGENTS: AgentDef[] = [
     costOut: PRICING[AGENT_MODELS.supervisor].output,
   },
   {
+    id: 'designer',
+    name: 'Designer',
+    icon: '✏️',
+    model: AGENT_MODELS.designer,
+    role: 'UI/UX · Design Specs · Layout',
+    color: '#f472b6',
+    costIn: PRICING[AGENT_MODELS.designer].input,
+    costOut: PRICING[AGENT_MODELS.designer].output,
+  },
+  {
     id: 'frontend',
     name: 'Frontend',
     icon: '🎨',
@@ -127,7 +137,7 @@ const initialState: AppState = {
       ts: Date.now(),
       agent: 'system',
       type: 'info',
-      message: 'Agent Control initialized. 5 agents standing by.',
+      message: 'Agent Control initialized. 6 agents standing by.',
     },
   ],
   costs: {},
@@ -394,17 +404,22 @@ function buildBatchPrompt(
   filePaths: string[],
   supervisorPlan: string,
   generatedFilePaths: string[],
+  designSpec?: string,
 ): string {
   const agentRole = agentId === 'frontend' ? 'Frontend (React/TypeScript/Tailwind)'
     : agentId === 'backend' ? 'Backend (Next.js API Routes/Prisma/Node.js)'
     : 'Web3 (Solidity/Foundry)'
+
+  const designSection = agentId === 'frontend' && designSpec
+    ? `\n\nDESIGNER SPEC — You MUST follow this design spec exactly. Match every layout, color, spacing, animation, and mobile breakpoint described below:\n${designSpec.slice(0, 6000)}\n`
+    : ''
 
   return `You are the ${agentRole} specialist.
 
 TASK: ${taskDescription}
 
 SUPERVISOR PLAN:
-${supervisorPlan.slice(0, 3000)}
+${supervisorPlan.slice(0, 3000)}${designSection}
 
 YOUR ASSIGNMENT — Generate these ${filePaths.length} file${filePaths.length !== 1 ? 's' : ''} with complete, production-ready code:
 ${filePaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}
@@ -425,7 +440,55 @@ RULES:
 - No placeholder code, no TODOs, no "implement later" — complete working code only
 - Each file MUST be wrapped in --- FILE: path --- and --- END FILE --- delimiters
 - Use the exact file paths from the list above
-- Match the tech stack and patterns from the supervisor plan`
+- Match the tech stack and patterns from the supervisor plan${agentId === 'frontend' && designSpec ? '\n- STRICTLY follow the Designer spec for all UI: layout, colors, spacing, animations, mobile breakpoints' : ''}`
+}
+
+function buildDesignerPrompt(
+  taskDescription: string,
+  supervisorPlan: string,
+  frontendFilePaths: string[],
+): string {
+  const pageFiles = frontendFilePaths.filter(p =>
+    p.includes('/page.') || p.includes('/layout.') || p.includes('/loading.') || p.includes('/error.')
+  )
+  const componentFiles = frontendFilePaths.filter(p =>
+    p.includes('components/') || p.includes('Components/')
+  )
+
+  return `You are the Designer. Create a comprehensive design spec for ALL UI pages and components in this project.
+
+TASK: ${taskDescription}
+
+SUPERVISOR PLAN (summary):
+${supervisorPlan.slice(0, 3000)}
+
+PAGES TO DESIGN (${pageFiles.length}):
+${pageFiles.map((p, i) => `${i + 1}. ${p}`).join('\n')}
+
+COMPONENTS TO DESIGN (${componentFiles.length}):
+${componentFiles.map((p, i) => `${i + 1}. ${p}`).join('\n')}
+
+ALL FRONTEND FILES (${frontendFilePaths.length}):
+${frontendFilePaths.join('\n')}
+
+Create a SINGLE, COMPLETE design spec covering ALL pages and components above.
+For each page and component, provide:
+1. Layout Spec — wireframe, grid, hierarchy
+2. Visual Spec — colors, fonts, borders, shadows, backgrounds
+3. Component Spec — sizes, spacing, colors, hover/animation, mobile adaptation
+4. Interaction Spec — hover, click, loading, empty, error states
+5. Mobile Spec — breakpoints (375px, 768px), navigation, touch targets
+6. Inspiration Reference — real website design patterns to follow
+
+DESIGN SYSTEM DEFAULTS (use unless the task specifies otherwise):
+- Background: dark theme (#0a0c16 base, rgba overlays)
+- Accent: vibrant gradient (#7c6ef6 → #e8608c)
+- Font: Inter for UI, DM Mono for code
+- Border radius: 12-16px for cards, 8px for buttons
+- Animations: subtle scale/opacity transitions (200-300ms)
+- Glass morphism: backdrop-blur + rgba backgrounds
+
+Output the complete design spec in plain English. DO NOT write any code.`
 }
 
 function buildFormatReminderPrompt(
@@ -460,6 +523,7 @@ function buildReviewerPrompt(
   supervisorPlan: string,
   filePlan: FilePlan[],
   generatedFiles: Record<string, string>,
+  designSpec?: string,
 ): string {
   const expectedPaths = filePlan.map(f => f.path)
   const generatedPaths = Object.keys(generatedFiles)
@@ -507,6 +571,18 @@ function buildReviewerPrompt(
     return `=== ${path} (${content.split('\n').length} lines) ===\n${preview}${content.length > 500 ? '\n...(truncated)' : ''}`
   }).join('\n\n')
 
+  const designCheckSection = designSpec
+    ? `\nDESIGNER SPEC (Frontend code must match this):
+${designSpec.slice(0, 4000)}
+
+DESIGN COMPLIANCE CHECK:
+- Does the Frontend code follow the Designer's layout spec?
+- Are the correct colors, fonts, and spacing used?
+- Are hover/click interactions implemented as specified?
+- Are mobile breakpoints handled per the spec?
+`
+    : ''
+
   return `You are the Reviewer. Perform STRICT validation of completeness and code quality.
 
 TASK: ${taskDescription}
@@ -516,7 +592,7 @@ ${expectedPaths.map(p => `- ${p}`).join('\n')}
 
 GENERATED FILES (${generatedPaths.length} total):
 ${generatedPaths.map(p => `- ${p}`).join('\n')}
-
+${designCheckSection}
 ${missingPaths.length > 0 ? `MISSING FILES (${missingPaths.length}):
 ${missingPaths.map(p => `- ${p}`).join('\n')}` : 'No missing files detected.'}
 
@@ -545,6 +621,7 @@ STRICT DECISION RULES (follow ALL):
 3. If more than 2 files contain TODO/placeholder comments → REJECTED
 4. Only approve if ALL files are present AND have real, complete implementations
 5. Never approve just because file count matches — check actual content
+6. If a Designer spec was provided, verify Frontend code follows the design spec (layout, colors, spacing, animations, mobile breakpoints)
 
 OUTPUT THIS EXACT FORMAT:
 
@@ -766,6 +843,7 @@ async function runPipeline(
     type: 'SET_PIPELINE',
     pipeline: [
       { id: 'plan', label: 'Planning', agent: 'supervisor', status: 'working' },
+      { id: 'design', label: 'Design', agent: 'designer', status: 'idle' },
       { id: 'implement', label: 'Implement', agent: 'backend', status: 'idle' },
       { id: 'review', label: 'Review', agent: 'reviewer', status: 'idle' },
       { id: 'deliver', label: 'Deliver', agent: 'supervisor', status: 'idle' },
@@ -791,6 +869,37 @@ async function runPipeline(
 
   // Hoist generatedFiles so it's accessible in Phase 4
   const generatedFiles: Record<string, string> = {}
+
+  // ── PHASE 1.5: Designer → Design Spec (only if UI pages exist) ────
+  const frontendFiles = filePlan.filter(f => f.agent === 'frontend')
+  const hasFrontend = frontendFiles.length > 0
+  let designSpec: string | undefined
+
+  if (hasFrontend) {
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'design', data: { status: 'working' } })
+    const frontendPaths = frontendFiles.map(f => f.path)
+    await addLog('supervisor', 'delegate', `→ designer: Design spec for ${frontendPaths.length} frontend files`)
+
+    dispatch({ type: 'UPDATE_AGENT', id: 'designer', data: { status: 'working', currentTask: `Designing ${frontendPaths.length} pages/components` } })
+
+    const designerResult = await callAgent(
+      'designer',
+      buildDesignerPrompt(taskDescription, supervisorPlan, frontendPaths),
+    )
+
+    if (designerResult.text.trim().length > 0) {
+      designSpec = designerResult.text
+      await addLog('designer', 'success', `Design spec created — ${designSpec.length} chars`)
+    } else {
+      await addLog('designer', 'warn', 'Designer returned empty spec — Frontend will proceed without design guidance')
+    }
+    dispatch({ type: 'UPDATE_AGENT', id: 'designer', data: { currentTask: null } })
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'design', data: { status: 'done' } })
+  } else {
+    await addLog('supervisor', 'info', 'No frontend files — skipping Designer')
+    dispatch({ type: 'UPDATE_AGENT', id: 'designer', data: { status: 'done', progress: 100 } })
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'design', data: { status: 'done' } })
+  }
 
   if (totalExpected === 0) {
     await addLog('supervisor', 'warn', 'No FILE_PLAN found — falling back to keyword-based delegation')
@@ -832,8 +941,9 @@ async function runPipeline(
 
     // Update pipeline to show all unique agents
     const uniqueAgents = [...new Set(filePlan.map(f => f.agent))]
-    const dynamicPipeline = [
+    const dynamicPipeline: PipelineStep[] = [
       { id: 'plan', label: 'Plan', agent: 'supervisor', status: 'done' as const },
+      { id: 'design', label: 'Design', agent: 'designer', status: 'done' as const },
       ...uniqueAgents.map(id => ({
         id,
         label: AGENTS.find(a => a.id === id)?.name ?? id,
@@ -879,6 +989,7 @@ async function runPipeline(
             filePaths,
             supervisorPlan,
             Object.keys(generatedFiles),
+            designSpec,
           )
 
           // Pass expectedFiles for auto follow-up (BUG 2)
@@ -934,6 +1045,7 @@ async function runPipeline(
         supervisorPlan,
         filePlan,
         generatedFiles,
+        designSpec,
       )
 
       const reviewResult = await callAgent('reviewer', reviewPrompt)
@@ -1466,8 +1578,8 @@ export default function App() {
         {/* ── Stats bar ───────────────────────────────────────────── */}
         <div style={{ display: 'flex', gap: 10, padding: '14px 0' }}>
           {[
-            { label: 'Active', value: `${activeCount}/5`, color: '#7c6ef6' },
-            { label: 'Done', value: `${doneCount}/5`, color: '#10b981' },
+            { label: 'Active', value: `${activeCount}/6`, color: '#7c6ef6' },
+            { label: 'Done', value: `${doneCount}/6`, color: '#10b981' },
             { label: 'Tasks', value: String(state.tasks.length), color: '#e8608c' },
             { label: 'Cost', value: `$${totalCost.toFixed(4)}`, color: '#f5b731' },
           ].map((s, i) => (
@@ -1497,7 +1609,7 @@ export default function App() {
         {/* ── Agent Cards ─────────────────────────────────────────── */}
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(5, 1fr)',
+          gridTemplateColumns: 'repeat(6, 1fr)',
           gap: 10,
           padding: '2px 0 14px',
         }}>
@@ -1616,7 +1728,7 @@ export default function App() {
           fontSize: 9.5,
           color: '#1f2937',
         }}>
-          <span>5 agents · Supervisor pattern · Anthropic API · Socket.io · Prisma SQLite</span>
+          <span>6 agents · Supervisor pattern · Anthropic API · Socket.io · Prisma SQLite</span>
           <span>claude-sonnet-4-6 + claude-opus-4-6</span>
         </div>
       </div>
