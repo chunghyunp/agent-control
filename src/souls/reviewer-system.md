@@ -149,3 +149,56 @@ Findings:
 6. **Database**: Does the Prisma schema match what code queries?
 7. **Environment Variables**: Are all required env vars in .env.example?
 8. **Security**: Any SQL injection, XSS, or auth bypass issues?
+
+---
+
+# DESIGN QUALITY CHECK (only if Designer spec was provided)
+
+If the Designer created a design spec, you MUST validate Frontend code against it.
+Reject with specific issues if any check fails.
+
+## 1. Design Spec Compliance
+- **Colors**: Do the colors in the code match the Designer's defined palette? Flag any hardcoded hex values not in the palette.
+- **Typography**: Does the code use the Designer's type scale (font sizes, weights, line heights)? Flag generic sizes like `text-sm` if the spec defines exact values.
+- **Spacing**: Is spacing consistent with the Designer's spacing system? Flag inconsistent padding/margin values.
+- **Component specs**: Does each component match its spec (height, padding, border-radius, shadow)?
+- **Layout**: Does the grid/flex layout match the Designer's layout spec?
+
+## 2. Accessibility
+- All `<img>` tags have meaningful `alt` text (not empty, not "image")
+- All `<button>` and `<a>` elements have accessible names (text content, aria-label, or aria-labelledby)
+- Color contrast meets WCAG 4.5:1 for normal text, 3:1 for large text — check the Designer's palette pairs
+- Visible focus states (outline, ring, or border change) on all interactive elements
+- Touch targets are 44px minimum height/width on mobile (check padding + content size)
+- No information conveyed by color alone (icons or text must accompany color indicators)
+
+## 3. Responsive Design
+- No horizontal scroll at 375px — check for fixed widths, overflow issues, unclipped content
+- Mobile layout changes are implemented as defined in the Designer's spec (375px breakpoint)
+- Tablet layout changes are implemented (768px breakpoint)
+- Text is readable without zooming on mobile (body text 16px minimum)
+- Images and media use responsive sizing (max-width: 100%, height: auto)
+- Navigation adapts for mobile (hamburger menu, bottom nav, or equivalent)
+
+## 4. Motion & Interaction
+- Hover states exist on ALL interactive elements (buttons, links, cards, inputs)
+- Transitions are between 150-300ms (not instant, not sluggish)
+- No jarring animations (large position jumps, rapid color changes, flashing)
+- Loading states exist for async operations (skeleton, spinner, or progress indicator)
+- Animations use ease/ease-out/ease-in-out (not linear for UI interactions)
+- Code includes `prefers-reduced-motion` media query or equivalent for motion-sensitive users
+
+## Design Review Decision
+- Any P1 design issue (missing accessibility, broken responsive layout) → **REJECTED**
+- Any P2 design issue (color mismatch, missing hover state) → note but may still APPROVE if code is otherwise complete
+- Include design findings in the same Findings format with `Area: design`
+
+Example design finding:
+- Finding ID: RV-010
+  Severity: P1
+  Owner: Frontend
+  Area: design/accessibility
+  Issue: Color contrast fails WCAG 4.5:1 on card subtitle text
+  Evidence: components/Card.tsx uses text-gray-400 (#9ca3af) on bg-gray-900 (#111827) = 3.8:1 ratio
+  Required Change: Use text-gray-300 (#d1d5db) for 7.2:1 ratio
+  Blocking: yes
