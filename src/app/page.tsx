@@ -1149,25 +1149,114 @@ async function runPipeline(
     validationIssues.push('Missing tsconfig.json for TypeScript project')
   }
 
-  // Check for broken internal imports
+  // ── IMPORT RESOLUTION CHECK ────────────────────────────────────────
+  // Resolve every import in every .ts/.tsx/.js/.jsx file against the file list.
+  // If an import doesn't resolve → block the push and send back for fixing.
+
+  interface BrokenImport {
+    file: string
+    importSpecifier: string
+    resolvedAs: string // what we looked for
+    suggestion: string // closest match in file list, if any
+  }
+
+  function resolveImport(
+    importingFile: string,
+    specifier: string,
+    allPaths: string[],
+  ): { resolved: boolean; tried: string; suggestion: string } {
+    let basePath: string
+
+    if (specifier.startsWith('@/')) {
+      // Alias import: @/components/Foo → components/Foo
+      basePath = specifier.slice(2)
+    } else {
+      // Relative import: ./Foo or ../Foo — resolve relative to importing file's directory
+      const dir = importingFile.includes('/') ? importingFile.slice(0, importingFile.lastIndexOf('/')) : ''
+      const parts = (dir ? dir + '/' + specifier : specifier).split('/')
+      const resolved: string[] = []
+      for (const part of parts) {
+        if (part === '.') continue
+        else if (part === '..') resolved.pop()
+        else resolved.push(part)
+      }
+      basePath = resolved.join('/')
+    }
+
+    // Strip extension if already provided
+    const stripped = basePath.replace(/\.(ts|tsx|js|jsx)$/, '')
+
+    // Candidates to check (in priority order)
+    const candidates = [
+      stripped + '.ts',
+      stripped + '.tsx',
+      stripped + '.js',
+      stripped + '.jsx',
+      stripped + '/index.ts',
+      stripped + '/index.tsx',
+      stripped + '/index.js',
+      stripped + '/index.jsx',
+      stripped, // exact match (e.g., .json, .css, .svg)
+    ]
+
+    for (const c of candidates) {
+      if (allPaths.includes(c)) {
+        return { resolved: true, tried: stripped, suggestion: '' }
+      }
+    }
+
+    // Find closest match for suggestion
+    const baseName = stripped.split('/').pop() ?? stripped
+    const matches = allPaths.filter(p => {
+      const pName = p.split('/').pop()?.replace(/\.(ts|tsx|js|jsx)$/, '') ?? ''
+      return pName === baseName
+    })
+    const suggestion = matches.length > 0 ? matches[0] : ''
+
+    return { resolved: false, tried: stripped, suggestion }
+  }
+
   const codeFiles = finalPaths.filter(p => /\.(ts|tsx|js|jsx)$/.test(p))
-  let brokenImports = 0
-  for (const path of codeFiles) {
-    const content = finalFiles[path]
-    const importMatches = content.matchAll(/from\s+['"]@\/([\w/.-]+)['"]/g)
-    for (const im of importMatches) {
-      const importPath = im[1].replace(/\.(ts|tsx|js|jsx)$/, '')
-      const candidates = [
-        importPath + '.ts', importPath + '.tsx', importPath + '/index.ts', importPath + '/index.tsx',
-        importPath + '.js', importPath + '.jsx',
-      ]
-      if (!candidates.some(c => finalPaths.includes(c) || finalPaths.includes(importPath))) {
-        brokenImports++
+  const brokenImports: BrokenImport[] = []
+
+  for (const filePath of codeFiles) {
+    const content = finalFiles[filePath]
+    // Match: from '@/...', from './...', from '../...'
+    const importRegex = /from\s+['"]((?:@\/|\.\.?\/)[^'"]+)['"]/g
+    let match: RegExpExecArray | null
+    while ((match = importRegex.exec(content)) !== null) {
+      const specifier = match[1]
+
+      // Skip non-code imports (css, scss, svg, json, images)
+      if (/\.(css|scss|sass|less|svg|png|jpg|jpeg|gif|webp|ico|json|woff|woff2|ttf|eot)$/.test(specifier)) continue
+
+      const result = resolveImport(filePath, specifier, finalPaths)
+      if (!result.resolved) {
+        brokenImports.push({
+          file: filePath,
+          importSpecifier: specifier,
+          resolvedAs: result.tried,
+          suggestion: result.suggestion,
+        })
       }
     }
   }
-  if (brokenImports > 0) {
-    validationIssues.push(`${brokenImports} potentially broken @/ imports`)
+
+  if (brokenImports.length > 0) {
+    validationIssues.push(`${brokenImports.length} broken imports`)
+
+    // Log each broken import with details
+    for (const bi of brokenImports.slice(0, 20)) {
+      const suggestionHint = bi.suggestion ? ` (did you mean ${bi.suggestion}?)` : ''
+      await addLog(
+        'supervisor',
+        'error',
+        `Build would fail: ${bi.file} imports "${bi.importSpecifier}" but no file resolves at ${bi.resolvedAs}${suggestionHint}`,
+      )
+    }
+    if (brokenImports.length > 20) {
+      await addLog('supervisor', 'error', `…and ${brokenImports.length - 20} more broken imports`)
+    }
   }
 
   if (validationIssues.length > 0) {
@@ -1176,16 +1265,130 @@ async function runPipeline(
     await addLog('supervisor', 'success', `Validation passed — ${finalPaths.length} files ready`)
   }
 
-  dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: 'done' } })
-  dispatch({ type: 'UPDATE_AGENT', id: 'supervisor', data: { status: 'done' } })
+  // ── IMPORT FIX CYCLE: Send broken imports back to Frontend for fixing ──
+  const MAX_IMPORT_FIX_CYCLES = 2
+  let importFixCycle = 0
 
-  dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'completed', result: `Generated ${finalPaths.length}/${totalExpected} files` } })
-  await addLog('supervisor', 'success', `Task complete — ${finalPaths.length}/${totalExpected} files generated`)
+  while (brokenImports.length > 0 && importFixCycle < MAX_IMPORT_FIX_CYCLES) {
+    importFixCycle++
+    await addLog('supervisor', 'info', `Import fix cycle ${importFixCycle}/${MAX_IMPORT_FIX_CYCLES} — ${brokenImports.length} broken imports`)
+
+    // Group broken imports by the agent that owns the importing file
+    const fixByAgent = new Map<string, BrokenImport[]>()
+    for (const bi of brokenImports) {
+      // Determine agent: check if file is in the filePlan, otherwise guess from path
+      const planned = filePlan.find(f => f.path === bi.file)
+      const agentId = planned?.agent ?? (bi.file.includes('api/') ? 'backend' : 'frontend')
+      const list = fixByAgent.get(agentId) ?? []
+      list.push(bi)
+      fixByAgent.set(agentId, list)
+    }
+
+    await Promise.all([...fixByAgent.entries()].map(async ([agentId, issues]) => {
+      const issueList = issues.map(bi => {
+        const suggestionHint = bi.suggestion
+          ? `\n   → Suggested fix: change import to "${bi.suggestion.replace(/\.(ts|tsx)$/, '').replace(/^/, '@/')}"`
+          : `\n   → No matching file found — create it or fix the import path`
+        return `- ${bi.file} imports "${bi.importSpecifier}" → resolves to "${bi.resolvedAs}" which does NOT exist${suggestionHint}`
+      }).join('\n')
+
+      const availableFiles = finalPaths
+        .filter(p => /\.(ts|tsx|js|jsx)$/.test(p))
+        .join('\n')
+
+      const fixPrompt = `IMPORT PATH FIX — The build will fail because of broken imports.
+
+Fix these ${issues.length} broken import${issues.length !== 1 ? 's' : ''}:
+${issueList}
+
+ALL available files in the project:
+${availableFiles}
+
+For each broken import, either:
+A) Fix the import path to point to the correct existing file
+B) Create the missing file if it should exist
+
+Output ONLY the files that need changes using the standard format:
+
+--- FILE: path/to/file.ext ---
+\`\`\`typescript
+// complete corrected code
+\`\`\`
+--- END FILE ---
+
+RULES:
+- Fix ALL broken imports listed above
+- Use exact paths from the available files list
+- If a file is missing, create it with complete implementation
+- Do NOT change any other code — only fix imports or create missing files`
+
+      await addLog('supervisor', 'delegate', `→ ${agentId}: Fix ${issues.length} broken imports`)
+      dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'working', currentTask: `Fixing ${issues.length} broken imports` } })
+
+      const fixResult = await callAgent(agentId, fixPrompt)
+      const fixedFiles = parseFileContents(fixResult.text)
+
+      if (Object.keys(fixedFiles).length > 0) {
+        Object.assign(generatedFiles, fixedFiles)
+        Object.assign(finalFiles, fixedFiles)
+        dispatch({ type: 'MERGE_PARSED_FILES', files: generatedFiles })
+        await addLog(agentId, 'success', `Fixed ${Object.keys(fixedFiles).length} files`)
+      }
+
+      dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'done', currentTask: null } })
+    }))
+
+    // Re-check imports after fixes
+    const updatedPaths = Object.keys(finalFiles)
+    brokenImports.length = 0 // clear
+
+    for (const filePath of updatedPaths.filter(p => /\.(ts|tsx|js|jsx)$/.test(p))) {
+      const content = finalFiles[filePath]
+      const importRegex = /from\s+['"]((?:@\/|\.\.?\/)[^'"]+)['"]/g
+      let m: RegExpExecArray | null
+      while ((m = importRegex.exec(content)) !== null) {
+        const specifier = m[1]
+        if (/\.(css|scss|sass|less|svg|png|jpg|jpeg|gif|webp|ico|json|woff|woff2|ttf|eot)$/.test(specifier)) continue
+        const result = resolveImport(filePath, specifier, updatedPaths)
+        if (!result.resolved) {
+          brokenImports.push({
+            file: filePath,
+            importSpecifier: specifier,
+            resolvedAs: result.tried,
+            suggestion: result.suggestion,
+          })
+        }
+      }
+    }
+
+    if (brokenImports.length === 0) {
+      await addLog('supervisor', 'success', `All imports resolved after fix cycle ${importFixCycle}`)
+    } else {
+      await addLog('supervisor', 'warn', `${brokenImports.length} broken imports remain after fix cycle ${importFixCycle}`)
+    }
+  }
+
+  // Final decision: block push if imports still broken
+  const pushBlocked = brokenImports.length > 0
+
+  if (pushBlocked) {
+    await addLog('supervisor', 'error', `Push BLOCKED — ${brokenImports.length} unresolved imports would cause build failure`)
+    for (const bi of brokenImports.slice(0, 10)) {
+      await addLog('supervisor', 'error', `  ✗ ${bi.file} → "${bi.importSpecifier}" (not found)`)
+    }
+  }
+
+  dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: pushBlocked ? 'error' : 'done' } })
+  dispatch({ type: 'UPDATE_AGENT', id: 'supervisor', data: { status: pushBlocked ? 'error' : 'done' } })
+
+  const finalPathsUpdated = Object.keys(finalFiles)
+  dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: pushBlocked ? 'error' : 'completed', result: pushBlocked ? `Blocked: ${brokenImports.length} unresolved imports` : `Generated ${finalPathsUpdated.length}/${totalExpected} files` } })
+  await addLog('supervisor', pushBlocked ? 'error' : 'success', pushBlocked ? `Task blocked — ${brokenImports.length} broken imports prevent push` : `Task complete — ${finalPathsUpdated.length}/${totalExpected} files generated`)
 
   await fetch('/api/tasks/' + taskId, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ status: 'completed', result: planResult.text.slice(0, 2000) }),
+    body: JSON.stringify({ status: pushBlocked ? 'error' : 'completed', result: pushBlocked ? `Blocked: ${brokenImports.length} unresolved imports` : planResult.text.slice(0, 2000) }),
   }).catch(() => null)
 
   await fetch('/api/emit', {
@@ -1194,14 +1397,20 @@ async function runPipeline(
     body: JSON.stringify({ event: 'task:complete', data: { taskId, title: taskDescription } }),
   }).catch(() => null)
 
+  if (pushBlocked) {
+    dispatch({ type: 'SET_TAB', tab: 'logs' })
+    dispatch({ type: 'SET_RUNNING', value: false })
+    return
+  }
+
   // ── AUTO-PUSH: Send all generated files to GitHub ────────────────────
   try {
-    await addLog('supervisor', 'info', `Pushing ${finalPaths.length} files to GitHub…`)
+    await addLog('supervisor', 'info', `Pushing ${finalPathsUpdated.length} files to GitHub…`)
     const pushRes = await fetch('/api/github/push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        files: finalPaths.map(p => ({ path: p, content: finalFiles[p] })),
+        files: finalPathsUpdated.map(p => ({ path: p, content: finalFiles[p] })),
         message: `feat: ${taskDescription.slice(0, 72)}`,
         ...(repoOverride && { owner: repoOverride.owner, repo: repoOverride.repo }),
       }),
