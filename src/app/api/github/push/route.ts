@@ -54,7 +54,18 @@ export async function POST(req: Request) {
   const targetBranch = branch || 'main'
 
   try {
-    const empty = await isRepoEmpty(token, owner, repo, targetBranch)
+    let empty: boolean
+    try {
+      empty = await isRepoEmpty(token, owner, repo, targetBranch)
+    } catch (repoCheckErr) {
+      // BUG 6 FIX: Handle cases where repo exists but is completely empty (no commits at all)
+      const status = (repoCheckErr as { status?: number })?.status
+      if (status === 409) {
+        empty = true
+      } else {
+        throw repoCheckErr
+      }
+    }
 
     // If repo is not empty and agents produced no files, nothing to push
     if (!empty && agentFiles.size === 0) {

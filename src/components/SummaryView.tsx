@@ -110,17 +110,24 @@ export default function SummaryView({ agents, agentStates, costs, isRunning, tot
             {/* Main row */}
             <div style={{
               display: 'grid',
-              gridTemplateColumns: '28px 140px 100px 80px 70px 1fr auto',
+              gridTemplateColumns: '28px 120px 100px 80px 70px 1fr auto',
               alignItems: 'center',
               gap: 0,
-              padding: '10px 16px',
+              padding: '10px 16px 4px',
               fontSize: 12,
             }}>
               {/* Icon */}
               <span style={{ fontSize: 14 }}>{agent.icon}</span>
 
-              {/* Agent name */}
-              <span style={{ color: '#e5e7eb', fontWeight: 500 }}>{agent.name}</span>
+              {/* Agent name + current task */}
+              <div>
+                <span style={{ color: '#e5e7eb', fontWeight: 500 }}>{agent.name}</span>
+                {st.currentTask && (
+                  <div style={{ fontSize: 9, color: '#4b5563', marginTop: 1, fontFamily: '"DM Mono", monospace' }}>
+                    {st.currentTask}
+                  </div>
+                )}
+              </div>
 
               {/* Status badge */}
               <span style={{
@@ -148,7 +155,7 @@ export default function SummaryView({ agents, agentStates, costs, isRunning, tot
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, paddingRight: 8 }}>
                 {st.files.length === 0
                   ? <span style={{ color: '#374151', fontSize: 11 }}>—</span>
-                  : st.files.map(f => (
+                  : st.files.slice(0, 6).map(f => (
                     <span key={f} style={{
                       background: 'rgba(55,65,81,0.4)',
                       color: '#9ca3af',
@@ -158,6 +165,11 @@ export default function SummaryView({ agents, agentStates, costs, isRunning, tot
                     }}>{f}</span>
                   ))
                 }
+                {st.files.length > 6 && (
+                  <span style={{ color: '#4b5563', fontSize: 10, fontFamily: '"DM Mono", monospace' }}>
+                    +{st.files.length - 6} more
+                  </span>
+                )}
               </div>
 
               {/* View Output button */}
@@ -181,6 +193,26 @@ export default function SummaryView({ agents, agentStates, costs, isRunning, tot
                 </button>
               )}
             </div>
+
+            {/* Agent progress bar */}
+            {(st.status === 'working' || st.status === 'reviewing') && (
+              <div style={{ padding: '0 16px 8px', paddingLeft: 44 }}>
+                <div style={{
+                  height: 3,
+                  background: 'rgba(31,41,55,0.6)',
+                  borderRadius: 3,
+                  overflow: 'hidden',
+                }}>
+                  <div style={{
+                    height: '100%',
+                    width: `${st.progress}%`,
+                    background: `linear-gradient(90deg, ${agent.color}80, ${agent.color})`,
+                    borderRadius: 3,
+                    transition: 'width 0.5s ease',
+                  }} />
+                </div>
+              </div>
+            )}
 
             {/* Expanded output panel */}
             {isExpanded && st.output && (
@@ -227,7 +259,7 @@ export default function SummaryView({ agents, agentStates, costs, isRunning, tot
       {activeAgents.length > 0 && (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: '28px 140px 100px 80px 70px 1fr auto',
+          gridTemplateColumns: '28px 120px 100px 80px 70px 1fr auto',
           alignItems: 'center',
           gap: 0,
           padding: '10px 16px',

@@ -266,7 +266,7 @@ async function callAnthropicViaServer(
   model: string,
   agentId: string,
   userMessage: string
-): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+): Promise<{ text: string; inputTokens: number; outputTokens: number; stopReason: string }> {
   const response = await fetch('/api/agent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -277,6 +277,7 @@ async function callAnthropicViaServer(
     error?: string
     content?: Array<{ type: string; text?: string }>
     usage?: { input_tokens?: number; output_tokens?: number }
+    stop_reason?: string
   }
 
   if (!response.ok) {
@@ -292,6 +293,7 @@ async function callAnthropicViaServer(
     text,
     inputTokens: data.usage?.input_tokens ?? 0,
     outputTokens: data.usage?.output_tokens ?? 0,
+    stopReason: data.stop_reason ?? 'end_turn',
   }
 }
 
@@ -452,6 +454,7 @@ The output did not contain valid --- FILE: --- blocks. You MUST use this EXACT f
 Now generate ALL ${filePaths.length} file${filePaths.length !== 1 ? 's' : ''} using this exact format. No prose, no explanations — just the FILE blocks.`
 }
 
+// BUG 4 FIX: Stricter reviewer validation
 function buildReviewerPrompt(
   taskDescription: string,
   supervisorPlan: string,
@@ -462,13 +465,49 @@ function buildReviewerPrompt(
   const generatedPaths = Object.keys(generatedFiles)
   const missingPaths = expectedPaths.filter(p => !generatedPaths.includes(p))
 
-  const fileContentsPreview = generatedPaths.slice(0, 20).map(path => {
+  // BUG 4: Detect stub/placeholder files
+  const stubFiles: string[] = []
+  const todoFiles: string[] = []
+  const importIssues: string[] = []
+
+  for (const [path, content] of Object.entries(generatedFiles)) {
+    const lines = content.split('\n').filter(l => l.trim().length > 0)
+    // Detect stub files (less than 3 non-empty lines for code files)
+    const ext = path.split('.').pop() ?? ''
+    if (['ts', 'tsx', 'js', 'jsx', 'sol'].includes(ext) && lines.length < 3) {
+      stubFiles.push(`${path} (${lines.length} lines)`)
+    }
+    // Detect TODO/placeholder comments
+    const todoCount = (content.match(/\/\/\s*TODO|\/\/\s*FIXME|\/\/\s*implement|\/\/\s*placeholder|\/\/\s*add .* here/gi) || []).length
+    if (todoCount > 0) {
+      todoFiles.push(`${path} (${todoCount} TODOs)`)
+    }
+    // Detect broken imports (files importing other generated files that don't exist)
+    const importMatches = content.matchAll(/from\s+['"](@\/|\.\.?\/)([\w/.-]+)['"]/g)
+    for (const im of importMatches) {
+      const importPath = im[2].replace(/\.(ts|tsx|js|jsx)$/, '')
+      // Check if the imported file exists in generated files
+      const candidates = [
+        importPath + '.ts', importPath + '.tsx', importPath + '/index.ts', importPath + '/index.tsx',
+        importPath + '.js', importPath + '.jsx',
+      ]
+      const exists = candidates.some(c => {
+        const fullPath = im[1] === '@/' ? c : c // simplified check
+        return generatedPaths.some(gp => gp.endsWith(fullPath) || gp === fullPath)
+      })
+      if (!exists && im[1] === '@/') {
+        importIssues.push(`${path} imports @/${im[2]} — not found`)
+      }
+    }
+  }
+
+  const fileContentsPreview = generatedPaths.slice(0, 25).map(path => {
     const content = generatedFiles[path] ?? ''
-    const preview = content.slice(0, 400)
-    return `=== ${path} (${content.split('\n').length} lines) ===\n${preview}${content.length > 400 ? '\n...(truncated)' : ''}`
+    const preview = content.slice(0, 500)
+    return `=== ${path} (${content.split('\n').length} lines) ===\n${preview}${content.length > 500 ? '\n...(truncated)' : ''}`
   }).join('\n\n')
 
-  return `You are the Reviewer. Verify completeness and code quality.
+  return `You are the Reviewer. Perform STRICT validation of completeness and code quality.
 
 TASK: ${taskDescription}
 
@@ -481,6 +520,15 @@ ${generatedPaths.map(p => `- ${p}`).join('\n')}
 ${missingPaths.length > 0 ? `MISSING FILES (${missingPaths.length}):
 ${missingPaths.map(p => `- ${p}`).join('\n')}` : 'No missing files detected.'}
 
+${stubFiles.length > 0 ? `STUB/EMPTY FILES (${stubFiles.length}):
+${stubFiles.map(s => `- ${s}`).join('\n')}` : ''}
+
+${todoFiles.length > 0 ? `FILES WITH TODO/PLACEHOLDER CODE (${todoFiles.length}):
+${todoFiles.map(s => `- ${s}`).join('\n')}` : ''}
+
+${importIssues.length > 0 ? `IMPORT ISSUES (${importIssues.length}):
+${importIssues.slice(0, 15).map(s => `- ${s}`).join('\n')}` : ''}
+
 GENERATED FILE CONTENTS (preview):
 ${fileContentsPreview}
 
@@ -488,11 +536,15 @@ COMPLETENESS VERIFICATION:
 - Expected: ${expectedPaths.length} files
 - Generated: ${generatedPaths.length} files
 - Missing: ${missingPaths.length} files
+- Stub files: ${stubFiles.length}
+- Files with TODOs: ${todoFiles.length}
 
-DECISION RULES:
-- If ANY expected file is missing → Status: REJECTED
-- If any file has only placeholder/stub code (empty functions, TODO comments only) → Status: REJECTED
-- Only approve if ALL files are present AND have real implementations
+STRICT DECISION RULES (follow ALL):
+1. If ANY expected file is missing → REJECTED
+2. If ANY file has less than 3 lines of actual code → REJECTED (stub)
+3. If more than 2 files contain TODO/placeholder comments → REJECTED
+4. Only approve if ALL files are present AND have real, complete implementations
+5. Never approve just because file count matches — check actual content
 
 OUTPUT THIS EXACT FORMAT:
 
@@ -501,6 +553,8 @@ Status: APPROVED
 Expected: ${expectedPaths.length}
 Generated: ${generatedPaths.length}
 Missing: ${missingPaths.length}
+Stubs: ${stubFiles.length}
+TODOs: ${todoFiles.length}
 REVIEW_RESULT_END
 
 MISSING_FILES_START
@@ -508,9 +562,9 @@ ${missingPaths.join('\n') || '(none)'}
 MISSING_FILES_END
 
 Findings:
-[List any code quality issues, interface mismatches, or security concerns]
+[List specific code quality issues, interface mismatches, broken imports, or security concerns]
 
-CRITICAL: Status MUST be REJECTED if Missing > 0. Never approve incomplete work.`
+CRITICAL: Status MUST be REJECTED if Missing > 0 OR Stubs > 0 OR TODOs > 2. Never approve incomplete work.`
 }
 
 function buildMissingFilesPrompt(
@@ -604,9 +658,13 @@ async function runPipeline(
   // Collect all agent text outputs for the GitHub push at the end
   const allAgentOutputs: string[] = []
 
+  // BUG 1 FIX: continuation on truncation (max 2 continuations)
+  const MAX_CONTINUATIONS = 2
+
   const callAgent = async (
     agentId: string,
     userMessage: string,
+    expectedFiles?: string[],
   ): Promise<{ text: string; error?: string }> => {
     const agentDef = AGENTS.find(a => a.id === agentId)!
     dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'working', startedAt: Date.now(), progress: 10 } })
@@ -618,16 +676,54 @@ async function runPipeline(
     }, 2000)
 
     try {
-      const { text, inputTokens, outputTokens } = await callAnthropicViaServer(
-        agentDef.model,
-        agentId,
-        userMessage,
-      )
+      let fullText = ''
+      let totalInputTokens = 0
+      let totalOutputTokens = 0
+      let continuations = 0
+
+      // Initial call
+      const result = await callAnthropicViaServer(agentDef.model, agentId, userMessage)
+      fullText = result.text
+      totalInputTokens += result.inputTokens
+      totalOutputTokens += result.outputTokens
+
+      // BUG 1: If response was truncated (max_tokens), auto-continue
+      while (result.stopReason === 'max_tokens' && continuations < MAX_CONTINUATIONS) {
+        continuations++
+        await addLog(agentId, 'info', `Output truncated — continuation ${continuations}/${MAX_CONTINUATIONS}`)
+
+        const continuePrompt = `Your previous response was truncated. Here is what you output so far:\n\n${fullText.slice(-2000)}\n\nContinue EXACTLY where you left off. Do NOT repeat any files already output. Continue outputting the remaining files using the --- FILE: --- format.`
+        const contResult = await callAnthropicViaServer(agentDef.model, agentId, continuePrompt)
+        fullText += '\n' + contResult.text
+        totalInputTokens += contResult.inputTokens
+        totalOutputTokens += contResult.outputTokens
+
+        if (contResult.stopReason !== 'max_tokens') break
+      }
+
+      // BUG 2: Missing file detection and auto follow-up (max 2 rounds)
+      if (expectedFiles && expectedFiles.length > 0) {
+        const MAX_FOLLOWUP_ROUNDS = 2
+        for (let round = 0; round < MAX_FOLLOWUP_ROUNDS; round++) {
+          const parsed = parseFileContents(fullText)
+          const generatedPaths = Object.keys(parsed)
+          const missing = expectedFiles.filter(f => !generatedPaths.includes(f))
+
+          if (missing.length === 0) break
+
+          await addLog(agentId, 'warn', `Missing ${missing.length} file(s) — auto follow-up round ${round + 1}`)
+          const followUp = buildMissingFilesPrompt(agentId, taskDescription, missing, supervisorPlan, generatedPaths)
+          const followResult = await callAnthropicViaServer(agentDef.model, agentId, followUp)
+          fullText += '\n' + followResult.text
+          totalInputTokens += followResult.inputTokens
+          totalOutputTokens += followResult.outputTokens
+        }
+      }
 
       clearInterval(progressInterval)
       dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'done', progress: 100 } })
 
-      const fileContents = parseFileContents(text)
+      const fileContents = parseFileContents(fullText)
       const fileKeys = Object.keys(fileContents)
       if (fileKeys.length > 0) {
         dispatch({ type: 'MERGE_PARSED_FILES', files: fileContents })
@@ -635,26 +731,27 @@ async function runPipeline(
       dispatch({
         type: 'SET_AGENT_OUTPUT',
         id: agentId,
-        output: text,
-        files: fileKeys.length > 0 ? fileKeys : parseFilePaths(text),
+        output: fullText,
+        files: fileKeys.length > 0 ? fileKeys : parseFilePaths(fullText),
       })
 
-      const cost = await recordCost(agentId, inputTokens, outputTokens, agentDef.model)
+      const cost = await recordCost(agentId, totalInputTokens, totalOutputTokens, agentDef.model)
       const filesGenerated = fileKeys.length
       const filesSuffix = filesGenerated > 0 ? ` — ${filesGenerated} file${filesGenerated !== 1 ? 's' : ''}` : ''
-      await addLog(agentId, 'success', `Complete${filesSuffix} · ${(inputTokens + outputTokens).toLocaleString()} tokens ($${cost.toFixed(4)})`)
+      const contSuffix = continuations > 0 ? ` (${continuations} cont.)` : ''
+      await addLog(agentId, 'success', `Done${filesSuffix}${contSuffix} · ${(totalInputTokens + totalOutputTokens).toLocaleString()} tok · $${cost.toFixed(4)}`)
 
       await fetch('/api/emit', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ event: 'agent:done', data: { taskId, agentId, inputTokens, outputTokens } }),
+        body: JSON.stringify({ event: 'agent:done', data: { taskId, agentId, inputTokens: totalInputTokens, outputTokens: totalOutputTokens } }),
       }).catch(() => null)
 
-      if (text.trim().length > 0) {
-        allAgentOutputs.push(text)
+      if (fullText.trim().length > 0) {
+        allAgentOutputs.push(fullText)
       }
 
-      return { text }
+      return { text: fullText }
     } catch (err) {
       clearInterval(progressInterval)
       const errMsg = err instanceof Error ? err.message : 'Unknown error'
@@ -692,6 +789,9 @@ async function runPipeline(
 
   dispatch({ type: 'SET_TOTAL_EXPECTED', count: totalExpected })
 
+  // Hoist generatedFiles so it's accessible in Phase 4
+  const generatedFiles: Record<string, string> = {}
+
   if (totalExpected === 0) {
     await addLog('supervisor', 'warn', 'No FILE_PLAN found — falling back to keyword-based delegation')
     // Fallback: keyword detection
@@ -710,12 +810,15 @@ async function runPipeline(
       const prompt = `Supervisor plan:\n${supervisorPlan}\n\nImplement the ${agentId} portion of: "${taskDescription}"\n\nOutput ALL files using this format:\n--- FILE: path/to/file.ext ---\n\`\`\`typescript\ncode\n\`\`\`\n--- END FILE ---`
       return callAgent(agentId, prompt)
     })
-    await Promise.all(fallbackPromises)
+    const fallbackResults = await Promise.all(fallbackPromises)
+    // Collect generated files from fallback
+    for (const r of fallbackResults) {
+      Object.assign(generatedFiles, parseFileContents(r.text))
+    }
   } else {
     await addLog('supervisor', 'info', `FILE_PLAN: ${totalExpected} files across ${new Set(filePlan.map(f => f.batch)).size} batches`)
 
     // ── PHASE 2: Multi-round batch implementation ─────────────────
-    const generatedFiles: Record<string, string> = {}
 
     // Group files by batch number
     const batchMap = new Map<number, FilePlan[]>()
@@ -751,9 +854,11 @@ async function runPipeline(
         agentMap.set(file.agent, list)
       }
 
+      // BUG 3 FIX: Track completed agents to prevent re-assignment
       // Run each agent in this batch (parallel across agents within the same batch)
       const agentResults = await Promise.all([...agentMap.entries()].map(async ([agentId, agentFiles]) => {
         dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: agentId, data: { status: 'working' } })
+        dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { currentTask: `Batch ${batchNum}: ${agentFiles.length} files` } })
         const agentNewFiles: Record<string, string> = {}
 
         // Split into sub-batches of MAX_FILES_PER_CALL
@@ -776,14 +881,15 @@ async function runPipeline(
             Object.keys(generatedFiles),
           )
 
-          const result = await callAgent(agentId, prompt)
+          // Pass expectedFiles for auto follow-up (BUG 2)
+          const result = await callAgent(agentId, prompt, filePaths)
 
           // Verify format compliance
           const parsed = parseFileContents(result.text)
           if (Object.keys(parsed).length === 0 && result.text.trim().length > 100) {
             await addLog(agentId, 'warn', `File format not followed for ${subBatchLabel} — retrying`)
             const retryPrompt = buildFormatReminderPrompt(agentId, taskDescription, filePaths, result.text)
-            const retryResult = await callAgent(agentId, retryPrompt)
+            const retryResult = await callAgent(agentId, retryPrompt, filePaths)
             Object.assign(agentNewFiles, parseFileContents(retryResult.text))
           } else {
             Object.assign(agentNewFiles, parsed)
@@ -791,6 +897,7 @@ async function runPipeline(
         }
 
         dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: agentId, data: { status: 'done' } })
+        dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { currentTask: null } })
         return agentNewFiles
       }))
 
@@ -902,12 +1009,66 @@ async function runPipeline(
     })
   }
 
-  // ── PHASE 4: Deliver ──────────────────────────────────────────
+  // ── PHASE 4: Deliver + Validate + Push ──────────────────────────────
+  dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: 'working' } })
+
+  // BUG 8 FIX: File validation before push
+  const finalFiles = generatedFiles
+  const finalPaths = Object.keys(finalFiles)
+  const validationIssues: string[] = []
+
+  // Check for package.json
+  const pkgJson = finalFiles['package.json']
+  if (!pkgJson) {
+    validationIssues.push('Missing package.json')
+  } else {
+    try {
+      const pkg = JSON.parse(pkgJson)
+      if (!pkg.dependencies && !pkg.devDependencies) {
+        validationIssues.push('package.json has no dependencies')
+      }
+    } catch {
+      validationIssues.push('package.json is invalid JSON')
+    }
+  }
+
+  // Check for tsconfig.json
+  if (!finalFiles['tsconfig.json'] && finalPaths.some(p => p.endsWith('.ts') || p.endsWith('.tsx'))) {
+    validationIssues.push('Missing tsconfig.json for TypeScript project')
+  }
+
+  // Check for broken internal imports
+  const codeFiles = finalPaths.filter(p => /\.(ts|tsx|js|jsx)$/.test(p))
+  let brokenImports = 0
+  for (const path of codeFiles) {
+    const content = finalFiles[path]
+    const importMatches = content.matchAll(/from\s+['"]@\/([\w/.-]+)['"]/g)
+    for (const im of importMatches) {
+      const importPath = im[1].replace(/\.(ts|tsx|js|jsx)$/, '')
+      const candidates = [
+        importPath + '.ts', importPath + '.tsx', importPath + '/index.ts', importPath + '/index.tsx',
+        importPath + '.js', importPath + '.jsx',
+      ]
+      if (!candidates.some(c => finalPaths.includes(c) || finalPaths.includes(importPath))) {
+        brokenImports++
+      }
+    }
+  }
+  if (brokenImports > 0) {
+    validationIssues.push(`${brokenImports} potentially broken @/ imports`)
+  }
+
+  if (validationIssues.length > 0) {
+    await addLog('supervisor', 'warn', `Validation: ${validationIssues.join('; ')}`)
+  } else {
+    await addLog('supervisor', 'success', `Validation passed — ${finalPaths.length} files ready`)
+  }
+
   dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: 'done' } })
   dispatch({ type: 'UPDATE_AGENT', id: 'supervisor', data: { status: 'done' } })
 
-  dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'completed', result: `Generated ${totalExpected} files` } })
-  await addLog('supervisor', 'success', `Task complete — ${totalExpected} files generated`)
+  dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'completed', result: `Generated ${finalPaths.length}/${totalExpected} files` } })
+  await addLog('supervisor', 'success', `Task complete — ${finalPaths.length}/${totalExpected} files generated`)
 
   await fetch('/api/tasks/' + taskId, {
     method: 'PATCH',
@@ -923,12 +1084,12 @@ async function runPipeline(
 
   // ── AUTO-PUSH: Send all generated files to GitHub ────────────────────
   try {
-    await addLog('supervisor', 'info', `Pushing code to GitHub…`)
+    await addLog('supervisor', 'info', `Pushing ${finalPaths.length} files to GitHub…`)
     const pushRes = await fetch('/api/github/push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        rawOutputs: allAgentOutputs,
+        files: finalPaths.map(p => ({ path: p, content: finalFiles[p] })),
         message: `feat: ${taskDescription.slice(0, 72)}`,
         ...(repoOverride && { owner: repoOverride.owner, repo: repoOverride.repo }),
       }),

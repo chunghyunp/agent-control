@@ -3,10 +3,10 @@ import { SOULS } from '@/lib/souls'
 
 const AGENT_MAX_TOKENS: Record<string, number> = {
   supervisor: 8000,
-  frontend: 64000,
+  frontend: 32000,
   backend: 32000,
   web3: 32000,
-  reviewer: 16000,
+  reviewer: 8000,
 }
 
 export async function POST(req: Request) {

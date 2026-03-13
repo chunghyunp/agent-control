@@ -115,9 +115,24 @@ export default function AgentCard({ agent, state }: AgentCardProps) {
         </div>
       </div>
 
+      {/* Current task label */}
+      {state.currentTask && (isActive || state.status === 'reviewing') && (
+        <div style={{
+          marginTop: 6,
+          fontSize: 9,
+          color: '#4b5563',
+          fontFamily: '"DM Mono", monospace',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {state.currentTask}
+        </div>
+      )}
+
       {/* Progress bar — only when working */}
       {isActive && (
-        <div style={{ marginTop: 8 }}>
+        <div style={{ marginTop: 6 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
             <span style={{ fontSize: 9, color: '#4b5563', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               Progress
@@ -138,11 +153,14 @@ export default function AgentCard({ agent, state }: AgentCardProps) {
         </div>
       )}
 
-      {/* Token summary when done */}
+      {/* Token summary + file count when done */}
       {state.status === 'done' && (state.tokensIn > 0 || state.tokensOut > 0) && (
         <div style={{ marginTop: 9, display: 'flex', gap: 10, fontSize: 9.5, color: '#4b5563', fontFamily: '"DM Mono", monospace' }}>
           <span style={{ color: '#6b7280' }}>↑{(state.tokensIn / 1000).toFixed(1)}K</span>
           <span style={{ color: '#6b7280' }}>↓{(state.tokensOut / 1000).toFixed(1)}K</span>
+          {state.files.length > 0 && (
+            <span style={{ color: '#10b981' }}>{state.files.length} files</span>
+          )}
           <span style={{ marginLeft: 'auto', color: '#374151' }}>
             ${(
               (state.tokensIn / 1_000_000 * agent.costIn) +
