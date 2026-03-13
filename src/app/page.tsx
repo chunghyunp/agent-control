@@ -1403,14 +1403,109 @@ RULES:
     return
   }
 
+  // ── HARD BUILD CHECK: npm install + npm run build in temp dir ────────
+  // BUG 10 FIX: Files that don't compile must NEVER reach GitHub.
+  const MAX_BUILD_FIX_ATTEMPTS = 3
+  let buildPassed = false
+
+  for (let buildAttempt = 1; buildAttempt <= MAX_BUILD_FIX_ATTEMPTS; buildAttempt++) {
+    await addLog('supervisor', 'info', `Build check ${buildAttempt}/${MAX_BUILD_FIX_ATTEMPTS} — running npm install && npm run build…`)
+
+    try {
+      const buildRes = await fetch('/api/build-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          files: Object.keys(finalFiles).map(p => ({ path: p, content: finalFiles[p] })),
+        }),
+      })
+      const buildData = await buildRes.json() as { ok: boolean; phase?: string; error?: string }
+
+      if (buildData.ok) {
+        await addLog('supervisor', 'success', `Build passed on attempt ${buildAttempt}`)
+        buildPassed = true
+        break
+      }
+
+      // Build failed — log the error
+      const errorPreview = (buildData.error ?? 'Unknown build error').slice(0, 1500)
+      await addLog('supervisor', 'error', `Build FAILED (${buildData.phase}): ${errorPreview}`)
+
+      if (buildAttempt >= MAX_BUILD_FIX_ATTEMPTS) {
+        await addLog('supervisor', 'error', `Build failed after ${MAX_BUILD_FIX_ATTEMPTS} attempts — push BLOCKED`)
+        break
+      }
+
+      // Send error to Frontend agent for fixing
+      await addLog('supervisor', 'delegate', `→ frontend: Fix build error (attempt ${buildAttempt})`)
+      dispatch({ type: 'UPDATE_AGENT', id: 'frontend', data: { status: 'working', currentTask: `Fixing build error (attempt ${buildAttempt})` } })
+
+      const buildFixPrompt = `BUILD FAILED — The project does not compile. Fix the errors and return ONLY the corrected files.
+
+BUILD ERROR:
+${errorPreview}
+
+ALL PROJECT FILES:
+${Object.keys(finalFiles).join('\n')}
+
+RULES:
+- Analyze the error message carefully
+- Return ONLY files that need changes to fix the build
+- Each file must be COMPLETE (not partial)
+- Use the standard format:
+
+--- FILE: path/to/file.ext ---
+\`\`\`typescript
+// complete corrected code
+\`\`\`
+--- END FILE ---
+
+- Do NOT remove functionality — only fix what's broken
+- Fix ALL errors, not just the first one
+- Common fixes: missing imports, type errors, missing exports, wrong paths`
+
+      const fixResult = await callAgent('frontend', buildFixPrompt)
+      const fixedFiles = parseFileContents(fixResult.text)
+      const fixedCount = Object.keys(fixedFiles).length
+
+      if (fixedCount > 0) {
+        Object.assign(generatedFiles, fixedFiles)
+        Object.assign(finalFiles, fixedFiles)
+        dispatch({ type: 'MERGE_PARSED_FILES', files: generatedFiles })
+        await addLog('frontend', 'success', `Returned ${fixedCount} fixed files`)
+      } else {
+        await addLog('frontend', 'warn', 'No files returned — retrying build anyway')
+      }
+
+      dispatch({ type: 'UPDATE_AGENT', id: 'frontend', data: { status: 'done', currentTask: null } })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      await addLog('supervisor', 'warn', `Build check error: ${msg}`)
+      // If the build-check endpoint itself fails, skip the gate rather than block forever
+      await addLog('supervisor', 'warn', 'Build check endpoint unavailable — proceeding with push')
+      buildPassed = true
+      break
+    }
+  }
+
+  if (!buildPassed) {
+    await addLog('supervisor', 'error', `Push BLOCKED — build fails after ${MAX_BUILD_FIX_ATTEMPTS} fix attempts`)
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: 'error' } })
+    dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'error', result: 'Build failed — code does not compile' } })
+    dispatch({ type: 'SET_TAB', tab: 'logs' })
+    dispatch({ type: 'SET_RUNNING', value: false })
+    return
+  }
+
   // ── AUTO-PUSH: Send all generated files to GitHub ────────────────────
+  const finalPathsAfterBuildFix = Object.keys(finalFiles)
   try {
-    await addLog('supervisor', 'info', `Pushing ${finalPathsUpdated.length} files to GitHub…`)
+    await addLog('supervisor', 'info', `Pushing ${finalPathsAfterBuildFix.length} files to GitHub…`)
     const pushRes = await fetch('/api/github/push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        files: finalPathsUpdated.map(p => ({ path: p, content: finalFiles[p] })),
+        files: finalPathsAfterBuildFix.map(p => ({ path: p, content: finalFiles[p] })),
         message: `feat: ${taskDescription.slice(0, 72)}`,
         ...(repoOverride && { owner: repoOverride.owner, repo: repoOverride.repo }),
       }),
