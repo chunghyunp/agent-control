@@ -1,6 +1,14 @@
 import { NextResponse } from 'next/server'
 import { SOULS } from '@/lib/souls'
 
+const AGENT_MAX_TOKENS: Record<string, number> = {
+  supervisor: 8000,
+  frontend: 64000,
+  backend: 32000,
+  web3: 32000,
+  reviewer: 16000,
+}
+
 export async function POST(req: Request) {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
@@ -29,7 +37,7 @@ export async function POST(req: Request) {
     },
     body: JSON.stringify({
       model: model || 'claude-sonnet-4-6',
-      max_tokens: 16000,
+      max_tokens: AGENT_MAX_TOKENS[agentId] ?? 16000,
       system: systemPrompt,
       messages: [{ role: 'user', content: message }],
     }),
