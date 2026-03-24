@@ -364,7 +364,7 @@ Output your Canonical Spec first, then the FILE_PLAN_START...FILE_PLAN_END block
 }
 
 function buildArchitectPrompt(taskDescription: string, orchestratorPlan: string): string {
-  return `You are the Software Architect. Review the Orchestrator's spec for architectural soundness and produce your Architecture Decision Record.
+  return `You are the Software Architect. Review the Orchestrator's spec for architectural soundness and produce your Architecture Decision Record AND File Contracts.
 
 TASK: ${taskDescription}
 
@@ -376,8 +376,10 @@ YOUR RESPONSIBILITIES:
 2. Identify architectural risks, missing abstractions, or over-engineering
 3. Define domain models, data flow, and API contracts
 4. Recommend any changes to the FILE_PLAN if files are missing or misplaced
+5. Produce FILE_CONTRACTS for EVERY file — this is CRITICAL for preventing import mismatches
 
-OUTPUT FORMAT:
+OUTPUT FORMAT (two sections):
+
 ARCHITECTURE_REVIEW_START
 - Stack validation: [pass/fail with notes]
 - Domain models: [key entities and relationships]
@@ -387,7 +389,102 @@ ARCHITECTURE_REVIEW_START
 - FILE_PLAN changes: [additions/removals, or "none"]
 ARCHITECTURE_REVIEW_END
 
+Then output file contracts for EVERY file in the FILE_PLAN:
+
+FILE_CONTRACTS_START
+FILE: path/to/file.tsx
+EXPORT: export default function ComponentName({ prop1, prop2 }: Props)
+TYPES: interface Props { prop1: string; prop2: number }
+USED_BY: app/page.tsx → import ComponentName from '@/path/to/file'
+---
+FILE: lib/utils.ts
+EXPORT: export function helperFn(arg: string): boolean
+EXPORT: export const CONFIG: Record<string, string>
+TYPES: (none beyond inline)
+USED_BY: components/Foo.tsx → import { helperFn } from '@/lib/utils'
+USED_BY: app/layout.tsx → import { CONFIG } from '@/lib/utils'
+---
+FILE_CONTRACTS_END
+
+FILE_CONTRACTS RULES:
+- One block per file, separated by ---
+- EXPORT: exact export statement (default vs named, function signature with types)
+- TYPES: all TypeScript interfaces/types this file exports (with fields)
+- USED_BY: every file that imports from this file, with the EXACT import statement
+- EVERY file in the FILE_PLAN MUST appear here — no exceptions
+- Files with no code exports (CSS, JSON, config) still need a FILE entry
+
+This ensures all agents use identical import paths and export names — zero mismatches.
 Be concise. Focus on correctness and security over elegance.`
+}
+
+function parseFileContracts(architectOutput: string): Map<string, { exports: string[]; types: string[]; usedBy: string[] }> {
+  const contracts = new Map<string, { exports: string[]; types: string[]; usedBy: string[] }>()
+  const contractMatch = architectOutput.match(/FILE_CONTRACTS_START([\s\S]*?)FILE_CONTRACTS_END/)
+  if (!contractMatch) return contracts
+
+  const blocks = contractMatch[1].split(/\n---\n/).filter(b => b.trim())
+  for (const block of blocks) {
+    const fileMatch = block.match(/FILE:\s*(.+)/)
+    if (!fileMatch) continue
+    const filePath = fileMatch[1].trim()
+    const exports = [...block.matchAll(/EXPORT:\s*(.+)/g)].map(m => m[1].trim())
+    const types = [...block.matchAll(/TYPES:\s*(.+)/g)].map(m => m[1].trim()).filter(t => t !== '(none beyond inline)' && t !== 'none')
+    const usedBy = [...block.matchAll(/USED_BY:\s*(.+)/g)].map(m => m[1].trim())
+    contracts.set(filePath, { exports, types, usedBy })
+  }
+  return contracts
+}
+
+function resolveImportPath(
+  importingFile: string,
+  specifier: string,
+  allPaths: string[],
+): { resolved: boolean; tried: string; suggestion: string } {
+  let basePath: string
+
+  if (specifier.startsWith('@/')) {
+    basePath = specifier.slice(2)
+  } else {
+    const dir = importingFile.includes('/') ? importingFile.slice(0, importingFile.lastIndexOf('/')) : ''
+    const parts = (dir ? dir + '/' + specifier : specifier).split('/')
+    const resolved: string[] = []
+    for (const part of parts) {
+      if (part === '.') continue
+      else if (part === '..') resolved.pop()
+      else resolved.push(part)
+    }
+    basePath = resolved.join('/')
+  }
+
+  const stripped = basePath.replace(/\.(ts|tsx|js|jsx)$/, '')
+
+  const candidates = [
+    stripped + '.ts',
+    stripped + '.tsx',
+    stripped + '.js',
+    stripped + '.jsx',
+    stripped + '/index.ts',
+    stripped + '/index.tsx',
+    stripped + '/index.js',
+    stripped + '/index.jsx',
+    stripped,
+  ]
+
+  for (const c of candidates) {
+    if (allPaths.includes(c)) {
+      return { resolved: true, tried: stripped, suggestion: '' }
+    }
+  }
+
+  const baseName = stripped.split('/').pop() ?? stripped
+  const matches = allPaths.filter(p => {
+    const pName = p.split('/').pop()?.replace(/\.(ts|tsx|js|jsx)$/, '') ?? ''
+    return pName === baseName
+  })
+  const suggestion = matches.length > 0 ? matches[0] : ''
+
+  return { resolved: false, tried: stripped, suggestion }
 }
 
 function buildSecurityPrompt(
@@ -439,6 +536,7 @@ function buildBatchPrompt(
   supervisorPlan: string,
   generatedFilePaths: string[],
   designSpec?: string,
+  fileContracts?: Map<string, { exports: string[]; types: string[]; usedBy: string[] }>,
 ): string {
   const agentRoleMap: Record<string, string> = {
     frontend: 'Frontend (React/TypeScript/Tailwind)',
@@ -453,12 +551,43 @@ function buildBatchPrompt(
     ? `\n\nDESIGNER SPEC — You MUST follow this design spec exactly. Match every layout, color, spacing, animation, and mobile breakpoint described below:\n${designSpec.slice(0, 6000)}\n`
     : ''
 
+  // Build file contracts section for assigned files
+  let contractsSection = ''
+  if (fileContracts && fileContracts.size > 0) {
+    const relevantContracts: string[] = []
+    for (const fp of filePaths) {
+      const contract = fileContracts.get(fp)
+      if (contract) {
+        const lines = [`FILE: ${fp}`]
+        for (const exp of contract.exports) lines.push(`  EXPORT: ${exp}`)
+        for (const typ of contract.types) lines.push(`  TYPES: ${typ}`)
+        for (const ub of contract.usedBy) lines.push(`  USED_BY: ${ub}`)
+        relevantContracts.push(lines.join('\n'))
+      }
+    }
+    // Also include contracts for files that import FROM the assigned files (so agents know what others expect)
+    for (const [fp, contract] of fileContracts) {
+      if (filePaths.includes(fp)) continue // already included
+      const importsAssigned = contract.usedBy.some(ub => filePaths.some(assigned => ub.includes(assigned)))
+      if (importsAssigned) {
+        const lines = [`FILE: ${fp} (other agent's file — for reference)`]
+        for (const exp of contract.exports) lines.push(`  EXPORT: ${exp}`)
+        for (const typ of contract.types) lines.push(`  TYPES: ${typ}`)
+        for (const ub of contract.usedBy) lines.push(`  USED_BY: ${ub}`)
+        relevantContracts.push(lines.join('\n'))
+      }
+    }
+    if (relevantContracts.length > 0) {
+      contractsSection = `\n\nFILE CONTRACTS — You MUST follow these exact export names, types, and import paths. Do NOT deviate:\n${relevantContracts.join('\n---\n')}\n`
+    }
+  }
+
   return `You are the ${agentRole} specialist.
 
 TASK: ${taskDescription}
 
 ORCHESTRATOR PLAN:
-${supervisorPlan.slice(0, 3000)}${designSection}
+${supervisorPlan.slice(0, 3000)}${designSection}${contractsSection}
 
 YOUR ASSIGNMENT — Generate these ${filePaths.length} file${filePaths.length !== 1 ? 's' : ''} with complete, production-ready code:
 ${filePaths.map((p, i) => `${i + 1}. ${p}`).join('\n')}
@@ -479,7 +608,7 @@ RULES:
 - No placeholder code, no TODOs, no "implement later" — complete working code only
 - Each file MUST be wrapped in --- FILE: path --- and --- END FILE --- delimiters
 - Use the exact file paths from the list above
-- Match the tech stack and patterns from the supervisor plan${agentId === 'frontend' && designSpec ? '\n- STRICTLY follow the Designer spec for all UI: layout, colors, spacing, animations, mobile breakpoints' : ''}`
+- Match the tech stack and patterns from the supervisor plan${fileContracts && fileContracts.size > 0 ? '\n- STRICTLY follow the FILE CONTRACTS for export names, types, and import paths — these are the agreed interface between all agents' : ''}${agentId === 'frontend' && designSpec ? '\n- STRICTLY follow the Designer spec for all UI: layout, colors, spacing, animations, mobile breakpoints' : ''}`
 }
 
 function buildDesignerPrompt(
@@ -918,8 +1047,15 @@ async function runPipeline(
 
   const architectResult = await callAgent('architect', buildArchitectPrompt(taskDescription, supervisorPlan))
 
+  let fileContracts = new Map<string, { exports: string[]; types: string[]; usedBy: string[] }>()
+
   if (architectResult.text.trim().length > 0) {
-    await addLog('architect', 'success', `Architecture review complete — ${architectResult.text.length} chars`)
+    fileContracts = parseFileContracts(architectResult.text)
+    const contractCount = fileContracts.size
+    await addLog('architect', 'success', `Architecture review complete — ${architectResult.text.length} chars, ${contractCount} file contracts`)
+    if (contractCount === 0) {
+      await addLog('architect', 'warn', 'No FILE_CONTRACTS found in architect output — agents will proceed without explicit contracts')
+    }
   } else {
     await addLog('architect', 'warn', 'Architect returned empty review — proceeding with original plan')
   }
@@ -1013,6 +1149,7 @@ async function runPipeline(
       })),
       { id: 'security', label: 'Security', agent: 'security', status: 'waiting' as const },
       { id: 'review', label: 'Review', agent: 'code-reviewer', status: 'waiting' as const },
+      { id: 'integration', label: 'Integration', agent: 'orchestrator', status: 'waiting' as const },
       { id: 'deliver', label: 'Deliver', agent: 'orchestrator', status: 'idle' as const },
     ]
     dispatch({ type: 'SET_PIPELINE', pipeline: dynamicPipeline })
@@ -1052,6 +1189,7 @@ async function runPipeline(
             supervisorPlan,
             Object.keys(generatedFiles),
             designSpec,
+            fileContracts,
           )
 
           // Pass expectedFiles for auto follow-up (BUG 2)
@@ -1204,6 +1342,321 @@ async function runPipeline(
       stepId: 'review',
       data: { status: finalApproved ? 'done' : 'error' },
     })
+
+    // ── PHASE 6.5: Integration Validator ─────────────────────────────
+    // Scans all generated files, extracts imports AND exports, cross-references
+    // named exports to catch mismatches BEFORE build.
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'integration', data: { status: 'working' } })
+    await addLog('orchestrator', 'info', `Integration Validator: scanning ${Object.keys(generatedFiles).length} files for export/import mismatches`)
+
+    interface ExportInfo {
+      names: string[]       // named exports: ['fetchPosts', 'Post']
+      hasDefault: boolean   // has a default export
+      defaultName?: string  // inferred default export name if possible
+    }
+
+    // Step 1: Extract all exports from every generated file
+    const fileExports = new Map<string, ExportInfo>()
+    const codeFilePaths = Object.keys(generatedFiles).filter(p => /\.(ts|tsx|js|jsx)$/.test(p))
+
+    for (const fp of codeFilePaths) {
+      const code = generatedFiles[fp]
+      const names: string[] = []
+      let hasDefault = false
+      let defaultName: string | undefined
+
+      // Named exports: export function X, export const X, export class X, export type X, export interface X, export enum X
+      const namedExportRegex = /export\s+(?:async\s+)?(?:function|const|let|var|class|type|interface|enum)\s+(\w+)/g
+      let em: RegExpExecArray | null
+      while ((em = namedExportRegex.exec(code)) !== null) {
+        names.push(em[1])
+      }
+
+      // Re-exports: export { X, Y } or export { X as Y }
+      const reExportRegex = /export\s*\{([^}]+)\}/g
+      while ((em = reExportRegex.exec(code)) !== null) {
+        const items = em[1].split(',').map(s => {
+          const asMatch = s.trim().match(/(\w+)\s+as\s+(\w+)/)
+          return asMatch ? asMatch[2] : s.trim().split(/\s/)[0]
+        }).filter(Boolean)
+        names.push(...items)
+      }
+
+      // Default exports
+      if (/export\s+default\s+/.test(code)) {
+        hasDefault = true
+        const defMatch = code.match(/export\s+default\s+(?:async\s+)?(?:function|class)\s+(\w+)/)
+        if (defMatch) defaultName = defMatch[1]
+      }
+
+      fileExports.set(fp, { names, hasDefault, defaultName })
+    }
+
+    // Step 2: Extract all imports and cross-reference against exports
+    interface ExportMismatch {
+      file: string
+      importSpecifier: string
+      targetFile: string
+      importedNames: string[]
+      availableExports: string[]
+      isDefaultMismatch: boolean
+    }
+
+    const exportMismatches: ExportMismatch[] = []
+
+    for (const fp of codeFilePaths) {
+      const code = generatedFiles[fp]
+
+      // Match named imports: import { X, Y } from '...'
+      const namedImportRegex = /import\s*\{([^}]+)\}\s*from\s+['"]((?:@\/|\.\.?\/)[^'"]+)['"]/g
+      let im: RegExpExecArray | null
+      while ((im = namedImportRegex.exec(code)) !== null) {
+        const importedNames = im[1].split(',').map(s => {
+          const asMatch = s.trim().match(/(\w+)\s+as\s+\w+/)
+          return asMatch ? asMatch[1] : s.trim()
+        }).filter(Boolean)
+        const specifier = im[2]
+
+        // Resolve the target file
+        const result = resolveImportPath(fp, specifier, Object.keys(generatedFiles))
+        if (!result.resolved) continue // path-level broken import — handled by existing check
+
+        // Find the actual resolved file
+        const stripped = specifier.startsWith('@/') ? specifier.slice(2) : specifier
+        const strippedClean = stripped.replace(/\.(ts|tsx|js|jsx)$/, '')
+        const candidates = [
+          strippedClean + '.ts', strippedClean + '.tsx', strippedClean + '.js', strippedClean + '.jsx',
+          strippedClean + '/index.ts', strippedClean + '/index.tsx', strippedClean + '/index.js', strippedClean + '/index.jsx',
+        ]
+        const targetFile = candidates.find(c => generatedFiles[c])
+        if (!targetFile) continue
+
+        const targetExports = fileExports.get(targetFile)
+        if (!targetExports) continue
+
+        // Check each imported name exists in target's exports
+        const missingNames = importedNames.filter(name =>
+          name !== 'type' && // skip 'type' keyword in `import { type Foo }`
+          !targetExports.names.includes(name)
+        )
+
+        if (missingNames.length > 0) {
+          exportMismatches.push({
+            file: fp,
+            importSpecifier: specifier,
+            targetFile,
+            importedNames: missingNames,
+            availableExports: targetExports.names,
+            isDefaultMismatch: false,
+          })
+        }
+      }
+
+      // Match default imports: import X from '...'
+      const defaultImportRegex = /import\s+(\w+)\s+from\s+['"]((?:@\/|\.\.?\/)[^'"]+)['"]/g
+      while ((im = defaultImportRegex.exec(code)) !== null) {
+        const importedName = im[1]
+        const specifier = im[2]
+
+        // Skip if it's actually `import type X from ...`
+        if (importedName === 'type') continue
+
+        const result = resolveImportPath(fp, specifier, Object.keys(generatedFiles))
+        if (!result.resolved) continue
+
+        const stripped = specifier.startsWith('@/') ? specifier.slice(2) : specifier
+        const strippedClean = stripped.replace(/\.(ts|tsx|js|jsx)$/, '')
+        const candidates = [
+          strippedClean + '.ts', strippedClean + '.tsx', strippedClean + '.js', strippedClean + '.jsx',
+          strippedClean + '/index.ts', strippedClean + '/index.tsx', strippedClean + '/index.js', strippedClean + '/index.jsx',
+        ]
+        const targetFile = candidates.find(c => generatedFiles[c])
+        if (!targetFile) continue
+
+        const targetExports = fileExports.get(targetFile)
+        if (!targetExports) continue
+
+        if (!targetExports.hasDefault) {
+          exportMismatches.push({
+            file: fp,
+            importSpecifier: specifier,
+            targetFile,
+            importedNames: [importedName],
+            availableExports: targetExports.names,
+            isDefaultMismatch: true,
+          })
+        }
+      }
+    }
+
+    // Step 3: If mismatches found, send broken files back to agents for fixing
+    const MAX_INTEGRATION_FIX_CYCLES = 2
+    let integrationFixCycle = 0
+
+    if (exportMismatches.length > 0) {
+      await addLog('orchestrator', 'warn', `Integration Validator found ${exportMismatches.length} export/import mismatches`)
+      for (const mm of exportMismatches.slice(0, 15)) {
+        if (mm.isDefaultMismatch) {
+          await addLog('orchestrator', 'error', `  ✗ ${mm.file} default-imports "${mm.importedNames[0]}" from ${mm.targetFile} — but target has NO default export (available: ${mm.availableExports.join(', ') || 'none'})`)
+        } else {
+          await addLog('orchestrator', 'error', `  ✗ ${mm.file} imports {${mm.importedNames.join(', ')}} from ${mm.targetFile} — not exported (available: ${mm.availableExports.join(', ') || 'none'})`)
+        }
+      }
+
+      while (exportMismatches.length > 0 && integrationFixCycle < MAX_INTEGRATION_FIX_CYCLES) {
+        integrationFixCycle++
+        await addLog('orchestrator', 'info', `Integration fix cycle ${integrationFixCycle}/${MAX_INTEGRATION_FIX_CYCLES} — ${exportMismatches.length} mismatches`)
+
+        // Group by the TARGET file's agent (fix the file that's missing the export)
+        const fixByAgent = new Map<string, ExportMismatch[]>()
+        for (const mm of exportMismatches) {
+          // The target file needs to add the missing export, so find its agent
+          const planned = filePlan.find(f => f.path === mm.targetFile)
+          const agentId = planned?.agent ?? (mm.targetFile.includes('api/') ? 'backend' : 'frontend')
+          const list = fixByAgent.get(agentId) ?? []
+          list.push(mm)
+          fixByAgent.set(agentId, list)
+        }
+
+        await Promise.all([...fixByAgent.entries()].map(async ([agentId, issues]) => {
+          // Collect unique target files that need fixing
+          const targetFiles = [...new Set(issues.map(i => i.targetFile))]
+
+          const issueList = issues.map(mm => {
+            if (mm.isDefaultMismatch) {
+              return `- ${mm.file} does \`import ${mm.importedNames[0]} from '${mm.importSpecifier}'\` but ${mm.targetFile} has NO default export\n  → Fix: add \`export default\` to ${mm.targetFile}, or change the import in ${mm.file} to use a named import`
+            }
+            return `- ${mm.file} does \`import { ${mm.importedNames.join(', ')} } from '${mm.importSpecifier}'\` but ${mm.targetFile} only exports: [${mm.availableExports.join(', ')}]\n  → Fix: add the missing export(s) to ${mm.targetFile}, or fix the import name in ${mm.file}`
+          }).join('\n')
+
+          // Include current code of target files for context
+          const targetCode = targetFiles.map(tf =>
+            `--- CURRENT ${tf} ---\n${(generatedFiles[tf] ?? '').slice(0, 3000)}\n--- END ---`
+          ).join('\n\n')
+
+          const fixPrompt = `INTEGRATION FIX — Export/import mismatches found. Fix the following issues:
+
+${issueList}
+
+CURRENT CODE OF FILES THAT NEED FIXES:
+${targetCode}
+
+For each issue, output the CORRECTED file(s) using:
+
+--- FILE: path/to/file.ext ---
+\`\`\`typescript
+// complete corrected code
+\`\`\`
+--- END FILE ---
+
+RULES:
+- Add missing exports or fix import names — whichever makes the code correct
+- Output COMPLETE file contents, not just the changed parts
+- Do NOT change any unrelated code
+- If an export was simply named differently, rename it to match what importers expect`
+
+          await addLog('orchestrator', 'delegate', `→ ${agentId}: Fix ${issues.length} export/import mismatches in ${targetFiles.length} files`)
+          dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'working', currentTask: `Fixing ${issues.length} export mismatches` } })
+
+          const fixResult = await callAgent(agentId, fixPrompt)
+          const fixedFiles = parseFileContents(fixResult.text)
+
+          if (Object.keys(fixedFiles).length > 0) {
+            Object.assign(generatedFiles, fixedFiles)
+            dispatch({ type: 'MERGE_PARSED_FILES', files: generatedFiles })
+            await addLog(agentId, 'success', `Fixed ${Object.keys(fixedFiles).length} files for export mismatches`)
+          }
+
+          dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'done', currentTask: null } })
+        }))
+
+        // Re-scan after fixes
+        exportMismatches.length = 0
+        const updatedCodeFiles = Object.keys(generatedFiles).filter(p => /\.(ts|tsx|js|jsx)$/.test(p))
+
+        // Re-extract exports
+        fileExports.clear()
+        for (const fp of updatedCodeFiles) {
+          const code = generatedFiles[fp]
+          const names: string[] = []
+          let hasDefault = false
+          let defaultName: string | undefined
+          const namedExportRegex2 = /export\s+(?:async\s+)?(?:function|const|let|var|class|type|interface|enum)\s+(\w+)/g
+          let em2: RegExpExecArray | null
+          while ((em2 = namedExportRegex2.exec(code)) !== null) names.push(em2[1])
+          const reExportRegex2 = /export\s*\{([^}]+)\}/g
+          while ((em2 = reExportRegex2.exec(code)) !== null) {
+            const items = em2[1].split(',').map(s => {
+              const asM = s.trim().match(/(\w+)\s+as\s+(\w+)/)
+              return asM ? asM[2] : s.trim().split(/\s/)[0]
+            }).filter(Boolean)
+            names.push(...items)
+          }
+          if (/export\s+default\s+/.test(code)) {
+            hasDefault = true
+            const defM = code.match(/export\s+default\s+(?:async\s+)?(?:function|class)\s+(\w+)/)
+            if (defM) defaultName = defM[1]
+          }
+          fileExports.set(fp, { names, hasDefault, defaultName })
+        }
+
+        // Re-check imports against exports
+        for (const fp of updatedCodeFiles) {
+          const code = generatedFiles[fp]
+          const namedImportRegex2 = /import\s*\{([^}]+)\}\s*from\s+['"]((?:@\/|\.\.?\/)[^'"]+)['"]/g
+          let im2: RegExpExecArray | null
+          while ((im2 = namedImportRegex2.exec(code)) !== null) {
+            const importedNames = im2[1].split(',').map(s => {
+              const asM = s.trim().match(/(\w+)\s+as\s+\w+/)
+              return asM ? asM[1] : s.trim()
+            }).filter(Boolean)
+            const specifier = im2[2]
+            const stripped = specifier.startsWith('@/') ? specifier.slice(2) : specifier
+            const strippedClean = stripped.replace(/\.(ts|tsx|js|jsx)$/, '')
+            const candidates = [
+              strippedClean + '.ts', strippedClean + '.tsx', strippedClean + '.js', strippedClean + '.jsx',
+              strippedClean + '/index.ts', strippedClean + '/index.tsx',
+            ]
+            const targetFile = candidates.find(c => generatedFiles[c])
+            if (!targetFile) continue
+            const targetExports = fileExports.get(targetFile)
+            if (!targetExports) continue
+            const missingNames = importedNames.filter(name =>
+              name !== 'type' && !targetExports.names.includes(name)
+            )
+            if (missingNames.length > 0) {
+              exportMismatches.push({ file: fp, importSpecifier: specifier, targetFile, importedNames: missingNames, availableExports: targetExports.names, isDefaultMismatch: false })
+            }
+          }
+          const defaultImportRegex2 = /import\s+(\w+)\s+from\s+['"]((?:@\/|\.\.?\/)[^'"]+)['"]/g
+          while ((im2 = defaultImportRegex2.exec(code)) !== null) {
+            if (im2[1] === 'type') continue
+            const specifier = im2[2]
+            const stripped = specifier.startsWith('@/') ? specifier.slice(2) : specifier
+            const strippedClean = stripped.replace(/\.(ts|tsx|js|jsx)$/, '')
+            const candidates = [
+              strippedClean + '.ts', strippedClean + '.tsx', strippedClean + '.js', strippedClean + '.jsx',
+              strippedClean + '/index.ts', strippedClean + '/index.tsx',
+            ]
+            const targetFile = candidates.find(c => generatedFiles[c])
+            if (!targetFile) continue
+            const targetExports = fileExports.get(targetFile)
+            if (!targetExports || targetExports.hasDefault) continue
+            exportMismatches.push({ file: fp, importSpecifier: specifier, targetFile, importedNames: [im2[1]], availableExports: targetExports.names, isDefaultMismatch: true })
+          }
+        }
+
+        if (exportMismatches.length === 0) {
+          await addLog('orchestrator', 'success', `All export/import mismatches resolved after fix cycle ${integrationFixCycle}`)
+        } else {
+          await addLog('orchestrator', 'warn', `${exportMismatches.length} export/import mismatches remain after fix cycle ${integrationFixCycle}`)
+        }
+      }
+    } else {
+      await addLog('orchestrator', 'success', 'Integration Validator: all exports match imports — no mismatches')
+    }
+
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'integration', data: { status: exportMismatches.length === 0 ? 'done' : 'error' } })
   }
 
   // ── PHASE 7: Deliver + Validate + Push ──────────────────────────────
@@ -1245,62 +1698,6 @@ async function runPipeline(
     suggestion: string // closest match in file list, if any
   }
 
-  function resolveImport(
-    importingFile: string,
-    specifier: string,
-    allPaths: string[],
-  ): { resolved: boolean; tried: string; suggestion: string } {
-    let basePath: string
-
-    if (specifier.startsWith('@/')) {
-      // Alias import: @/components/Foo → components/Foo
-      basePath = specifier.slice(2)
-    } else {
-      // Relative import: ./Foo or ../Foo — resolve relative to importing file's directory
-      const dir = importingFile.includes('/') ? importingFile.slice(0, importingFile.lastIndexOf('/')) : ''
-      const parts = (dir ? dir + '/' + specifier : specifier).split('/')
-      const resolved: string[] = []
-      for (const part of parts) {
-        if (part === '.') continue
-        else if (part === '..') resolved.pop()
-        else resolved.push(part)
-      }
-      basePath = resolved.join('/')
-    }
-
-    // Strip extension if already provided
-    const stripped = basePath.replace(/\.(ts|tsx|js|jsx)$/, '')
-
-    // Candidates to check (in priority order)
-    const candidates = [
-      stripped + '.ts',
-      stripped + '.tsx',
-      stripped + '.js',
-      stripped + '.jsx',
-      stripped + '/index.ts',
-      stripped + '/index.tsx',
-      stripped + '/index.js',
-      stripped + '/index.jsx',
-      stripped, // exact match (e.g., .json, .css, .svg)
-    ]
-
-    for (const c of candidates) {
-      if (allPaths.includes(c)) {
-        return { resolved: true, tried: stripped, suggestion: '' }
-      }
-    }
-
-    // Find closest match for suggestion
-    const baseName = stripped.split('/').pop() ?? stripped
-    const matches = allPaths.filter(p => {
-      const pName = p.split('/').pop()?.replace(/\.(ts|tsx|js|jsx)$/, '') ?? ''
-      return pName === baseName
-    })
-    const suggestion = matches.length > 0 ? matches[0] : ''
-
-    return { resolved: false, tried: stripped, suggestion }
-  }
-
   const codeFiles = finalPaths.filter(p => /\.(ts|tsx|js|jsx)$/.test(p))
   const brokenImports: BrokenImport[] = []
 
@@ -1315,7 +1712,7 @@ async function runPipeline(
       // Skip non-code imports (css, scss, svg, json, images)
       if (/\.(css|scss|sass|less|svg|png|jpg|jpeg|gif|webp|ico|json|woff|woff2|ttf|eot)$/.test(specifier)) continue
 
-      const result = resolveImport(filePath, specifier, finalPaths)
+      const result = resolveImportPath(filePath, specifier, finalPaths)
       if (!result.resolved) {
         brokenImports.push({
           file: filePath,
@@ -1434,7 +1831,7 @@ RULES:
       while ((m = importRegex.exec(content)) !== null) {
         const specifier = m[1]
         if (/\.(css|scss|sass|less|svg|png|jpg|jpeg|gif|webp|ico|json|woff|woff2|ttf|eot)$/.test(specifier)) continue
-        const result = resolveImport(filePath, specifier, updatedPaths)
+        const result = resolveImportPath(filePath, specifier, updatedPaths)
         if (!result.resolved) {
           brokenImports.push({
             file: filePath,

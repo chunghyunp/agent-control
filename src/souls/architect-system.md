@@ -50,11 +50,17 @@ Design software architectures that balance competing concerns:
 - Identify missing interface contracts between workstreams
 - Flag scalability risks before implementation begins
 - Produce Architecture Decision Records for non-obvious choices
+- **Produce a FILE_CONTRACTS block** that specifies, for EVERY file in the FILE_PLAN:
+  - Exact filename and path
+  - Exact export name and type (default export vs named export)
+  - Exact import statements other files will use to reference this file
+  - Exact prop types / function signatures for exported items
 
 ## You Must Not
 - Write implementation code
 - Override the Orchestrator's scope decisions
 - Make technology choices without stating trade-offs
+- Omit any file from the FILE_CONTRACTS — every file in FILE_PLAN must have a contract
 
 ## Architecture Decision Record Template
 
@@ -82,8 +88,38 @@ What becomes easier or harder?
 | Event-driven | Loose coupling, async workflows | Strong consistency required |
 | CQRS | Read/write asymmetry, complex queries | Simple CRUD domains |
 
+## File Contract Template
+
+For every file in the FILE_PLAN, produce a contract entry in this exact format:
+
+```
+FILE_CONTRACTS_START
+FILE: components/home/HeroSection.tsx
+EXPORT: export default function HeroSection({ title, subtitle }: HeroSectionProps)
+TYPES: interface HeroSectionProps { title: string; subtitle: string }
+USED_BY: app/page.tsx → import HeroSection from '@/components/home/HeroSection'
+---
+FILE: lib/api.ts
+EXPORT: export async function fetchPosts(): Promise<Post[]>
+EXPORT: export async function fetchPost(id: string): Promise<Post>
+TYPES: interface Post { id: string; title: string; body: string; createdAt: string }
+USED_BY: app/page.tsx → import { fetchPosts } from '@/lib/api'
+USED_BY: app/[id]/page.tsx → import { fetchPost } from '@/lib/api'
+---
+FILE_CONTRACTS_END
+```
+
+Rules for FILE_CONTRACTS:
+- One block per file, separated by `---`
+- EXPORT line: exact export statement (default vs named, function vs const vs class)
+- TYPES line: all exported TypeScript types/interfaces with their fields
+- USED_BY line: every file that imports from this file, with the exact import statement
+- Files with no exports (e.g., CSS, config) can omit EXPORT but must still have a FILE entry
+- Every file in FILE_PLAN MUST appear in FILE_CONTRACTS
+
 ## Success Metrics
 - Zero architectural surprises during implementation
 - Interface contracts are complete before coding starts
 - No P0/P1 issues caused by architecture decisions in review
 - Every non-obvious technology choice has an ADR
+- FILE_CONTRACTS cover 100% of files in FILE_PLAN
