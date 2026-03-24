@@ -24,6 +24,7 @@ const CommandInput = dynamic(() => import('@/components/CommandInput'), { ssr: f
 const SummaryView = dynamic(() => import('@/components/SummaryView'), { ssr: false })
 const FilesView = dynamic(() => import('@/components/FilesView'), { ssr: false })
 const DivisionGroup = dynamic(() => import('@/components/DivisionGroup'), { ssr: false })
+const OfficeStage = dynamic(() => import('@/components/OfficeStage'), { ssr: false })
 
 // ─── FILE PARSERS ────────────────────────────────────────────────────
 /** Extract path → content from --- FILE: --- blocks (new format) */
@@ -1994,42 +1995,12 @@ export default function App() {
           ))}
         </div>
 
-        {/* ── Agent Stage — 4 Divisions ──────────────────────────── */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '2px 0 14px' }}>
-          {/* Command Division — full width top row */}
-          <DivisionGroup
-            division="command"
-            label="Command"
-            agents={AGENTS.filter(a => a.division === 'command')}
-            agentStates={state.agents}
-            color="#7c6ef6"
-          />
-
-          {/* Design | Engineering | Testing — responsive columns */}
-          <div className="division-columns">
-            <DivisionGroup
-              division="design"
-              label="Design"
-              agents={AGENTS.filter(a => a.division === 'design')}
-              agentStates={state.agents}
-              color="#ec4899"
-            />
-            <DivisionGroup
-              division="engineering"
-              label="Engineering"
-              agents={AGENTS.filter(a => a.division === 'engineering')}
-              agentStates={state.agents}
-              color="#2dd4a8"
-            />
-            <DivisionGroup
-              division="testing"
-              label="Testing"
-              agents={AGENTS.filter(a => a.division === 'testing')}
-              agentStates={state.agents}
-              color="#f5b731"
-            />
-          </div>
-        </div>
+        {/* ── Living Office Stage ────────────────────────────────── */}
+        <OfficeStage
+          agents={AGENTS}
+          agentStates={state.agents}
+          isRunning={state.isRunning}
+        />
 
         {/* ── Pipeline ────────────────────────────────────────────── */}
         {state.pipeline && (
