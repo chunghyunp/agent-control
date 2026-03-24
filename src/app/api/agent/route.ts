@@ -2,12 +2,22 @@ import { NextResponse } from 'next/server'
 import { SOULS } from '@/lib/souls'
 
 const AGENT_MAX_TOKENS: Record<string, number> = {
-  supervisor: 8000,
-  designer: 8000,
+  // Command — planning/spec output, moderate size
+  orchestrator: 8000,
+  architect: 8000,
+  // Design — specs not code, moderate size
+  'ux-researcher': 4000,
+  'ui-designer': 8000,
+  'brand-guardian': 4000,
+  // Engineering — code output, large
   frontend: 32000,
   backend: 32000,
   web3: 32000,
-  reviewer: 8000,
+  security: 8000,
+  'tech-writer': 8000,
+  // Testing — review output, moderate
+  'code-reviewer': 8000,
+  'blockchain-auditor': 8000,
 }
 
 export async function POST(req: Request) {

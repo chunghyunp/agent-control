@@ -1,3 +1,5 @@
+export type Division = 'command' | 'design' | 'engineering' | 'testing'
+
 export interface AgentDef {
   id: string
   name: string
@@ -5,12 +7,13 @@ export interface AgentDef {
   model: string
   role: string
   color: string
+  division: Division
   costIn: number  // USD per 1M input tokens
   costOut: number // USD per 1M output tokens
 }
 
 export interface AgentState {
-  status: 'idle' | 'working' | 'waiting' | 'done' | 'error' | 'reviewing'
+  status: 'idle' | 'working' | 'waiting' | 'done' | 'error' | 'reviewing' | 'meeting' | 'handoff'
   progress: number
   currentTask: string | null
   tokensIn: number

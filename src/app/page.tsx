@@ -23,6 +23,7 @@ const TaskHistory = dynamic(() => import('@/components/TaskHistory'), { ssr: fal
 const CommandInput = dynamic(() => import('@/components/CommandInput'), { ssr: false })
 const SummaryView = dynamic(() => import('@/components/SummaryView'), { ssr: false })
 const FilesView = dynamic(() => import('@/components/FilesView'), { ssr: false })
+const DivisionGroup = dynamic(() => import('@/components/DivisionGroup'), { ssr: false })
 
 // ─── FILE PARSERS ────────────────────────────────────────────────────
 /** Extract path → content from --- FILE: --- blocks (new format) */
@@ -55,67 +56,29 @@ function parseFilePaths(text: string): string[] {
 }
 
 // ─── AGENT DEFINITIONS ──────────────────────────────────────────────
+function agentDef(id: string, name: string, icon: string, role: string, color: string, division: AgentDef['division']): AgentDef {
+  const model = AGENT_MODELS[id] ?? 'claude-sonnet-4-6'
+  const pricing = PRICING[model] ?? { input: 3, output: 15 }
+  return { id, name, icon, model, role, color, division, costIn: pricing.input, costOut: pricing.output }
+}
+
 const AGENTS: AgentDef[] = [
-  {
-    id: 'supervisor',
-    name: 'Supervisor',
-    icon: '🧠',
-    model: AGENT_MODELS.supervisor,
-    role: 'Orchestrator · Specs · Delegation',
-    color: '#7c6ef6',
-    costIn: PRICING[AGENT_MODELS.supervisor].input,
-    costOut: PRICING[AGENT_MODELS.supervisor].output,
-  },
-  {
-    id: 'designer',
-    name: 'Designer',
-    icon: '✏️',
-    model: AGENT_MODELS.designer,
-    role: 'UI/UX · Design Specs · Layout',
-    color: '#f472b6',
-    costIn: PRICING[AGENT_MODELS.designer].input,
-    costOut: PRICING[AGENT_MODELS.designer].output,
-  },
-  {
-    id: 'frontend',
-    name: 'Frontend',
-    icon: '🎨',
-    model: AGENT_MODELS.frontend,
-    role: 'React · TypeScript · Tailwind',
-    color: '#e8608c',
-    costIn: PRICING[AGENT_MODELS.frontend].input,
-    costOut: PRICING[AGENT_MODELS.frontend].output,
-  },
-  {
-    id: 'backend',
-    name: 'Backend',
-    icon: '⚙️',
-    model: AGENT_MODELS.backend,
-    role: 'API · DB · DevOps',
-    color: '#2dd4a8',
-    costIn: PRICING[AGENT_MODELS.backend].input,
-    costOut: PRICING[AGENT_MODELS.backend].output,
-  },
-  {
-    id: 'web3',
-    name: 'Web3 Dev',
-    icon: '🔗',
-    model: AGENT_MODELS.web3,
-    role: 'Solidity · Foundry · Security',
-    color: '#b38cfa',
-    costIn: PRICING[AGENT_MODELS.web3].input,
-    costOut: PRICING[AGENT_MODELS.web3].output,
-  },
-  {
-    id: 'reviewer',
-    name: 'Reviewer',
-    icon: '🔍',
-    model: AGENT_MODELS.reviewer,
-    role: 'Code Review · QA · Testing',
-    color: '#f5b731',
-    costIn: PRICING[AGENT_MODELS.reviewer].input,
-    costOut: PRICING[AGENT_MODELS.reviewer].output,
-  },
+  // Command
+  agentDef('orchestrator', 'Orchestrator', '🧠', 'Specs · Delegation · Integration', '#7c6ef6', 'command'),
+  agentDef('architect', 'Architect', '🏛️', 'System Design · ADRs · Contracts', '#6366f1', 'command'),
+  // Design
+  agentDef('ux-researcher', 'UX Researcher', '🔬', 'User Research · Personas · Journeys', '#ec4899', 'design'),
+  agentDef('ui-designer', 'UI Designer', '✏️', 'Design System · Components · Layout', '#f472b6', 'design'),
+  agentDef('brand-guardian', 'Brand Guardian', '🛡️', 'Brand Voice · Copy · Consistency', '#f9a8d4', 'design'),
+  // Engineering
+  agentDef('frontend', 'Frontend Dev', '🎨', 'React · TypeScript · Tailwind', '#e8608c', 'engineering'),
+  agentDef('backend', 'Backend Dev', '⚙️', 'API · DB · DevOps', '#2dd4a8', 'engineering'),
+  agentDef('web3', 'Web3 Dev', '🔗', 'Solidity · Foundry · Contracts', '#b38cfa', 'engineering'),
+  agentDef('security', 'Security Eng', '🔒', 'Threat Model · OWASP · Hardening', '#ef4444', 'engineering'),
+  agentDef('tech-writer', 'Tech Writer', '📚', 'README · API Docs · Guides', '#14b8a6', 'engineering'),
+  // Testing
+  agentDef('code-reviewer', 'Code Reviewer', '🔍', 'Code Review · QA · Completeness', '#f5b731', 'testing'),
+  agentDef('blockchain-auditor', 'Chain Auditor', '⛓️', 'Contract Audit · Exploit Analysis', '#f59e0b', 'testing'),
 ]
 
 // ─── INITIAL STATE ───────────────────────────────────────────────────
@@ -137,7 +100,7 @@ const initialState: AppState = {
       ts: Date.now(),
       agent: 'system',
       type: 'info',
-      message: 'Agent Control initialized. 6 agents standing by.',
+      message: 'Agent Control initialized. 12 agents across 4 divisions standing by.',
     },
   ],
   costs: {},
@@ -310,7 +273,7 @@ async function callAnthropicViaServer(
 // ─── FILE PLAN HELPERS ────────────────────────────────────────────────
 interface FilePlan {
   batch: number
-  agent: 'backend' | 'frontend' | 'web3'
+  agent: string
   path: string
 }
 
@@ -333,9 +296,9 @@ function parseSupervisorFilePlan(output: string): FilePlan[] {
       const secondColon = line.indexOf(':', firstColon + 1)
       if (firstColon === -1 || secondColon === -1) return null
       const batch = parseInt(line.slice(0, firstColon), 10)
-      const agent = line.slice(firstColon + 1, secondColon).trim() as FilePlan['agent']
+      const agent = line.slice(firstColon + 1, secondColon).trim()
       const path = line.slice(secondColon + 1).trim()
-      if (isNaN(batch) || !path || !['backend', 'frontend', 'web3'].includes(agent)) return null
+      if (isNaN(batch) || !path || !agent) return null
       return { batch, agent, path }
     })
     .filter((x): x is FilePlan => x !== null)
@@ -362,7 +325,7 @@ function parseReviewResult(output: string): ReviewResult {
 }
 
 function buildSupervisorPrompt(taskDescription: string): string {
-  return `You are the Supervisor. Analyze this task and output a Canonical Spec + FILE_PLAN.
+  return `You are the Orchestrator. Analyze this task and output a Canonical Spec + FILE_PLAN.
 
 TASK: ${taskDescription}
 
@@ -390,12 +353,82 @@ Batch 7 = Web3: contracts/*.sol, web3 hooks (only if this task needs blockchain)
 
 RULES:
 - Include EVERY file the complete app needs — do NOT omit config files
-- Assign backend, frontend, or web3 (lowercase)
+- Assign each file to an agent: backend, frontend, web3, security, or tech-writer (lowercase)
+- Only include web3 files if the task involves blockchain/contracts
 - File paths must be exact (no leading slashes)
 - The FILE_PLAN must be complete — the agents will ONLY generate files listed here
 - Typical Next.js app has 25-50 files total
 
 Output your Canonical Spec first, then the FILE_PLAN_START...FILE_PLAN_END block at the very end.`
+}
+
+function buildArchitectPrompt(taskDescription: string, orchestratorPlan: string): string {
+  return `You are the Software Architect. Review the Orchestrator's spec for architectural soundness and produce your Architecture Decision Record.
+
+TASK: ${taskDescription}
+
+ORCHESTRATOR PLAN:
+${orchestratorPlan.slice(0, 4000)}
+
+YOUR RESPONSIBILITIES:
+1. Validate the Orchestrator's tech stack choices and file structure
+2. Identify architectural risks, missing abstractions, or over-engineering
+3. Define domain models, data flow, and API contracts
+4. Recommend any changes to the FILE_PLAN if files are missing or misplaced
+
+OUTPUT FORMAT:
+ARCHITECTURE_REVIEW_START
+- Stack validation: [pass/fail with notes]
+- Domain models: [key entities and relationships]
+- API contracts: [endpoint signatures]
+- Data flow: [how data moves through the system]
+- Risks: [architectural concerns]
+- FILE_PLAN changes: [additions/removals, or "none"]
+ARCHITECTURE_REVIEW_END
+
+Be concise. Focus on correctness and security over elegance.`
+}
+
+function buildSecurityPrompt(
+  taskDescription: string,
+  orchestratorPlan: string,
+  generatedFiles: Record<string, string>,
+): string {
+  const fileSnippets = Object.entries(generatedFiles)
+    .map(([path, code]) => `--- ${path} ---\n${code.slice(0, 1500)}`)
+    .join('\n\n')
+    .slice(0, 12000)
+
+  return `You are the Security Engineer. Perform a security review of the generated code.
+
+TASK: ${taskDescription}
+
+PLAN SUMMARY:
+${orchestratorPlan.slice(0, 2000)}
+
+GENERATED CODE:
+${fileSnippets}
+
+REVIEW CHECKLIST:
+1. No hardcoded secrets, API keys, or credentials in code
+2. All user input validated and sanitized at trust boundaries
+3. Authentication on all protected endpoints
+4. Authorization checks (not just authentication)
+5. CSRF protection on state-changing operations
+6. No SQL injection, XSS, or SSRF vulnerabilities
+7. Error messages don't leak internal details
+8. Sensitive data not logged or exposed in client
+
+OUTPUT FORMAT:
+SECURITY_REVIEW_START
+Status: PASS | WARN | FAIL
+Findings: [count by severity]
+SECURITY_REVIEW_END
+
+For each finding:
+- SEC-[N]: [P0|P1|P2|P3] [Category] — [file]: [issue] → [fix]
+
+Be direct. Pair every problem with a solution.`
 }
 
 function buildBatchPrompt(
@@ -406,9 +439,14 @@ function buildBatchPrompt(
   generatedFilePaths: string[],
   designSpec?: string,
 ): string {
-  const agentRole = agentId === 'frontend' ? 'Frontend (React/TypeScript/Tailwind)'
-    : agentId === 'backend' ? 'Backend (Next.js API Routes/Prisma/Node.js)'
-    : 'Web3 (Solidity/Foundry)'
+  const agentRoleMap: Record<string, string> = {
+    frontend: 'Frontend (React/TypeScript/Tailwind)',
+    backend: 'Backend (Next.js API Routes/Prisma/Node.js)',
+    web3: 'Web3 (Solidity/Foundry)',
+    security: 'Security (Threat modeling/OWASP/Hardening)',
+    'tech-writer': 'Technical Writer (README/API Docs)',
+  }
+  const agentRole = agentRoleMap[agentId] ?? AGENTS.find(a => a.id === agentId)?.role ?? agentId
 
   const designSection = agentId === 'frontend' && designSpec
     ? `\n\nDESIGNER SPEC — You MUST follow this design spec exactly. Match every layout, color, spacing, animation, and mobile breakpoint described below:\n${designSpec.slice(0, 6000)}\n`
@@ -418,7 +456,7 @@ function buildBatchPrompt(
 
 TASK: ${taskDescription}
 
-SUPERVISOR PLAN:
+ORCHESTRATOR PLAN:
 ${supervisorPlan.slice(0, 3000)}${designSection}
 
 YOUR ASSIGNMENT — Generate these ${filePaths.length} file${filePaths.length !== 1 ? 's' : ''} with complete, production-ready code:
@@ -455,7 +493,7 @@ function buildDesignerPrompt(
     p.includes('components/') || p.includes('Components/')
   )
 
-  return `You are the Designer. Create a comprehensive design spec for ALL UI pages and components in this project.
+  return `You are the UI Designer. Create a comprehensive design spec for ALL UI pages and components in this project.
 
 TASK: ${taskDescription}
 
@@ -838,20 +876,22 @@ async function runPipeline(
     }
   }
 
-  // ── PHASE 1: Supervisor → Canonical Spec + FILE_PLAN ─────────────
+  // ── PHASE 1: Orchestrator → Canonical Spec + FILE_PLAN ───────────
   dispatch({
     type: 'SET_PIPELINE',
     pipeline: [
-      { id: 'plan', label: 'Planning', agent: 'supervisor', status: 'working' },
-      { id: 'design', label: 'Design', agent: 'designer', status: 'idle' },
+      { id: 'plan', label: 'Planning', agent: 'orchestrator', status: 'working' },
+      { id: 'architect', label: 'Architect', agent: 'architect', status: 'idle' },
+      { id: 'design', label: 'Design', agent: 'ui-designer', status: 'idle' },
       { id: 'implement', label: 'Implement', agent: 'backend', status: 'idle' },
-      { id: 'review', label: 'Review', agent: 'reviewer', status: 'idle' },
-      { id: 'deliver', label: 'Deliver', agent: 'supervisor', status: 'idle' },
+      { id: 'security', label: 'Security', agent: 'security', status: 'idle' },
+      { id: 'review', label: 'Review', agent: 'code-reviewer', status: 'idle' },
+      { id: 'deliver', label: 'Deliver', agent: 'orchestrator', status: 'idle' },
     ],
   })
 
-  await addLog('supervisor', 'delegate', `New task: "${taskDescription.slice(0, 80)}"`)
-  const planResult = await callAgent('supervisor', buildSupervisorPrompt(taskDescription))
+  await addLog('orchestrator', 'delegate', `New task: "${taskDescription.slice(0, 80)}"`)
+  const planResult = await callAgent('orchestrator', buildSupervisorPrompt(taskDescription))
 
   if (planResult.error) {
     dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'error' } })
@@ -870,7 +910,22 @@ async function runPipeline(
   // Hoist generatedFiles so it's accessible in Phase 4
   const generatedFiles: Record<string, string> = {}
 
-  // ── PHASE 1.5: Designer → Design Spec (only if UI pages exist) ────
+  // ── PHASE 2: Architect → Architecture Review ──────────────────
+  dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'architect', data: { status: 'working' } })
+  dispatch({ type: 'UPDATE_AGENT', id: 'architect', data: { status: 'working', currentTask: 'Reviewing architecture' } })
+  await addLog('orchestrator', 'delegate', '→ architect: Review spec for architectural soundness')
+
+  const architectResult = await callAgent('architect', buildArchitectPrompt(taskDescription, supervisorPlan))
+
+  if (architectResult.text.trim().length > 0) {
+    await addLog('architect', 'success', `Architecture review complete — ${architectResult.text.length} chars`)
+  } else {
+    await addLog('architect', 'warn', 'Architect returned empty review — proceeding with original plan')
+  }
+  dispatch({ type: 'UPDATE_AGENT', id: 'architect', data: { status: 'done', currentTask: null, progress: 100 } })
+  dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'architect', data: { status: 'done' } })
+
+  // ── PHASE 3: Designer → Design Spec (only if UI pages exist) ────
   const frontendFiles = filePlan.filter(f => f.agent === 'frontend')
   const hasFrontend = frontendFiles.length > 0
   let designSpec: string | undefined
@@ -878,45 +933,49 @@ async function runPipeline(
   if (hasFrontend) {
     dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'design', data: { status: 'working' } })
     const frontendPaths = frontendFiles.map(f => f.path)
-    await addLog('supervisor', 'delegate', `→ designer: Design spec for ${frontendPaths.length} frontend files`)
+    await addLog('orchestrator', 'delegate', `→ ui-designer: Design spec for ${frontendPaths.length} frontend files`)
 
-    dispatch({ type: 'UPDATE_AGENT', id: 'designer', data: { status: 'working', currentTask: `Designing ${frontendPaths.length} pages/components` } })
+    dispatch({ type: 'UPDATE_AGENT', id: 'ui-designer', data: { status: 'working', currentTask: `Designing ${frontendPaths.length} pages/components` } })
 
     const designerResult = await callAgent(
-      'designer',
+      'ui-designer',
       buildDesignerPrompt(taskDescription, supervisorPlan, frontendPaths),
     )
 
     if (designerResult.text.trim().length > 0) {
       designSpec = designerResult.text
-      await addLog('designer', 'success', `Design spec created — ${designSpec.length} chars`)
+      await addLog('ui-designer', 'success', `Design spec created — ${designSpec.length} chars`)
     } else {
-      await addLog('designer', 'warn', 'Designer returned empty spec — Frontend will proceed without design guidance')
+      await addLog('ui-designer', 'warn', 'Designer returned empty spec — Frontend will proceed without design guidance')
     }
-    dispatch({ type: 'UPDATE_AGENT', id: 'designer', data: { currentTask: null } })
+    dispatch({ type: 'UPDATE_AGENT', id: 'ui-designer', data: { currentTask: null } })
     dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'design', data: { status: 'done' } })
   } else {
-    await addLog('supervisor', 'info', 'No frontend files — skipping Designer')
-    dispatch({ type: 'UPDATE_AGENT', id: 'designer', data: { status: 'done', progress: 100 } })
+    await addLog('orchestrator', 'info', 'No frontend files — skipping UI Designer')
+    dispatch({ type: 'UPDATE_AGENT', id: 'ui-designer', data: { status: 'done', progress: 100 } })
     dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'design', data: { status: 'done' } })
   }
 
   if (totalExpected === 0) {
-    await addLog('supervisor', 'warn', 'No FILE_PLAN found — falling back to keyword-based delegation')
-    // Fallback: keyword detection
+    await addLog('orchestrator', 'warn', 'No FILE_PLAN found — falling back to keyword-based delegation')
+    // Fallback: smart keyword-based task routing
     const lower = taskDescription.toLowerCase()
     const needsWeb3 = /contract|token|staking|erc|solidity|web3|blockchain|nft|defi/.test(lower)
     const needsFrontend = /page|ui|component|frontend|dashboard|form|button|display|react|tsx/.test(lower)
     const needsBackend = /api|server|database|endpoint|auth|backend|deploy|docker|prisma|express/.test(lower)
+    const needsSecurity = /security|audit|pentest|owasp|vulnerability|hardening/.test(lower)
+    const needsDocs = /readme|docs|documentation|guide|setup/.test(lower)
     const agentsToRun: string[] = []
     if (needsWeb3) agentsToRun.push('web3')
     if (needsBackend || !needsFrontend) agentsToRun.push('backend')
     if (needsFrontend || !needsBackend) agentsToRun.push('frontend')
+    if (needsSecurity) agentsToRun.push('security')
+    if (needsDocs) agentsToRun.push('tech-writer')
     if (agentsToRun.length === 0) agentsToRun.push('backend', 'frontend')
 
     const fallbackPromises = agentsToRun.map(async agentId => {
-      await addLog('supervisor', 'delegate', `→ ${agentId}: Implement ${agentId} portion`)
-      const prompt = `Supervisor plan:\n${supervisorPlan}\n\nImplement the ${agentId} portion of: "${taskDescription}"\n\nOutput ALL files using this format:\n--- FILE: path/to/file.ext ---\n\`\`\`typescript\ncode\n\`\`\`\n--- END FILE ---`
+      await addLog('orchestrator', 'delegate', `→ ${agentId}: Implement ${agentId} portion`)
+      const prompt = `Orchestrator plan:\n${supervisorPlan}\n\nImplement the ${agentId} portion of: "${taskDescription}"\n\nOutput ALL files using this format:\n--- FILE: path/to/file.ext ---\n\`\`\`typescript\ncode\n\`\`\`\n--- END FILE ---`
       return callAgent(agentId, prompt)
     })
     const fallbackResults = await Promise.all(fallbackPromises)
@@ -925,9 +984,9 @@ async function runPipeline(
       Object.assign(generatedFiles, parseFileContents(r.text))
     }
   } else {
-    await addLog('supervisor', 'info', `FILE_PLAN: ${totalExpected} files across ${new Set(filePlan.map(f => f.batch)).size} batches`)
+    await addLog('orchestrator', 'info', `FILE_PLAN: ${totalExpected} files across ${new Set(filePlan.map(f => f.batch)).size} batches`)
 
-    // ── PHASE 2: Multi-round batch implementation ─────────────────
+    // ── PHASE 4: Multi-round batch implementation ─────────────────
 
     // Group files by batch number
     const batchMap = new Map<number, FilePlan[]>()
@@ -942,16 +1001,18 @@ async function runPipeline(
     // Update pipeline to show all unique agents
     const uniqueAgents = [...new Set(filePlan.map(f => f.agent))]
     const dynamicPipeline: PipelineStep[] = [
-      { id: 'plan', label: 'Plan', agent: 'supervisor', status: 'done' as const },
-      { id: 'design', label: 'Design', agent: 'designer', status: 'done' as const },
+      { id: 'plan', label: 'Plan', agent: 'orchestrator', status: 'done' as const },
+      { id: 'architect', label: 'Architect', agent: 'architect', status: 'done' as const },
+      { id: 'design', label: 'Design', agent: 'ui-designer', status: 'done' as const },
       ...uniqueAgents.map(id => ({
         id,
         label: AGENTS.find(a => a.id === id)?.name ?? id,
         agent: id,
         status: 'waiting' as const,
       })),
-      { id: 'review', label: 'Review', agent: 'reviewer', status: 'waiting' as const },
-      { id: 'deliver', label: 'Deliver', agent: 'supervisor', status: 'idle' as const },
+      { id: 'security', label: 'Security', agent: 'security', status: 'waiting' as const },
+      { id: 'review', label: 'Review', agent: 'code-reviewer', status: 'waiting' as const },
+      { id: 'deliver', label: 'Deliver', agent: 'orchestrator', status: 'idle' as const },
     ]
     dispatch({ type: 'SET_PIPELINE', pipeline: dynamicPipeline })
 
@@ -978,7 +1039,7 @@ async function runPipeline(
           const subBatchLabel = `batch ${batchNum}${agentFiles.length > MAX_FILES_PER_CALL ? ` (${Math.floor(i / MAX_FILES_PER_CALL) + 1}/${Math.ceil(agentFiles.length / MAX_FILES_PER_CALL)})` : ''}`
 
           await addLog(
-            'supervisor',
+            'orchestrator',
             'delegate',
             `→ ${agentId}: ${subBatchLabel} — ${filePaths.join(', ')}`,
           )
@@ -1024,9 +1085,32 @@ async function runPipeline(
       await addLog('system', 'info', `Files: ${done}/${totalExpected} (${pct}%)`)
     }
 
-    // ── PHASE 3: Reviewer completeness check (max 2 cycles) ──────
+    // ── PHASE 5: Security Review ───────────────────────────────────
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'security', data: { status: 'working' } })
+    dispatch({ type: 'UPDATE_AGENT', id: 'security', data: { status: 'working', currentTask: 'Security review' } })
+    await addLog('orchestrator', 'delegate', `→ security: Reviewing ${Object.keys(generatedFiles).length} files for vulnerabilities`)
+
+    const securityResult = await callAgent('security', buildSecurityPrompt(taskDescription, supervisorPlan, generatedFiles))
+
+    if (securityResult.text.trim().length > 0) {
+      const hasP0 = /P0/.test(securityResult.text)
+      const hasP1 = /P1/.test(securityResult.text)
+      if (hasP0) {
+        await addLog('security', 'error', 'CRITICAL security findings detected — see review for details')
+      } else if (hasP1) {
+        await addLog('security', 'warn', 'High-severity security findings — see review for details')
+      } else {
+        await addLog('security', 'success', 'Security review complete — no critical issues')
+      }
+    } else {
+      await addLog('security', 'warn', 'Security review returned empty — proceeding')
+    }
+    dispatch({ type: 'UPDATE_AGENT', id: 'security', data: { status: 'done', currentTask: null, progress: 100 } })
+    dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'security', data: { status: 'done' } })
+
+    // ── PHASE 6: Code Reviewer completeness check (max 2 cycles) ──
     dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'review', data: { status: 'working' } })
-    dispatch({ type: 'UPDATE_AGENT', id: 'reviewer', data: { status: 'reviewing' } })
+    dispatch({ type: 'UPDATE_AGENT', id: 'code-reviewer', data: { status: 'reviewing' } })
 
     let reviewCycle = 0
     const MAX_REVIEW_CYCLES = 2
@@ -1035,9 +1119,9 @@ async function runPipeline(
     while (reviewCycle < MAX_REVIEW_CYCLES) {
       const currentGenerated = Object.keys(generatedFiles)
       await addLog(
-        'supervisor',
+        'orchestrator',
         'delegate',
-        `→ reviewer: Cycle ${reviewCycle + 1} — checking ${currentGenerated.length}/${totalExpected} files`,
+        `→ code-reviewer: Cycle ${reviewCycle + 1} — checking ${currentGenerated.length}/${totalExpected} files`,
       )
 
       const reviewPrompt = buildReviewerPrompt(
@@ -1048,11 +1132,11 @@ async function runPipeline(
         designSpec,
       )
 
-      const reviewResult = await callAgent('reviewer', reviewPrompt)
+      const reviewResult = await callAgent('code-reviewer', reviewPrompt)
       const { approved, missingFiles } = parseReviewResult(reviewResult.text)
 
       if (approved) {
-        await addLog('reviewer', 'success', `APPROVED — ${currentGenerated.length}/${totalExpected} files verified`)
+        await addLog('code-reviewer', 'success', `APPROVED — ${currentGenerated.length}/${totalExpected} files verified`)
         finalApproved = true
         break
       }
@@ -1064,20 +1148,20 @@ async function runPipeline(
         : filePlan.map(f => f.path).filter(p => !generatedFiles[p])
 
       await addLog(
-        'reviewer',
+        'code-reviewer',
         'warn',
         `REJECTED (cycle ${reviewCycle + 1}/${MAX_REVIEW_CYCLES}) — ${missing.length} files missing: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? '…' : ''}`,
       )
 
       if (missing.length === 0) {
         if (reviewCycle === MAX_REVIEW_CYCLES - 1) {
-          await addLog('reviewer', 'warn', 'Max cycles reached — proceeding with current files')
+          await addLog('code-reviewer', 'warn', 'Max cycles reached — proceeding with current files')
           break
         }
       }
 
       if (reviewCycle === MAX_REVIEW_CYCLES - 1) {
-        await addLog('reviewer', 'warn', `Max review cycles (${MAX_REVIEW_CYCLES}) reached — proceeding`)
+        await addLog('code-reviewer', 'warn', `Max review cycles (${MAX_REVIEW_CYCLES}) reached — proceeding`)
         break
       }
 
@@ -1093,7 +1177,7 @@ async function runPipeline(
         }
 
         await Promise.all([...missingByAgent.entries()].map(async ([agentId, files]) => {
-          await addLog('supervisor', 'delegate', `→ ${agentId}: Generate ${files.length} missing files`)
+          await addLog('orchestrator', 'delegate', `→ ${agentId}: Generate ${files.length} missing files`)
           const prompt = buildMissingFilesPrompt(
             agentId,
             taskDescription,
@@ -1121,7 +1205,7 @@ async function runPipeline(
     })
   }
 
-  // ── PHASE 4: Deliver + Validate + Push ──────────────────────────────
+  // ── PHASE 7: Deliver + Validate + Push ──────────────────────────────
   dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: 'working' } })
 
   // BUG 8 FIX: File validation before push
@@ -1249,20 +1333,20 @@ async function runPipeline(
     for (const bi of brokenImports.slice(0, 20)) {
       const suggestionHint = bi.suggestion ? ` (did you mean ${bi.suggestion}?)` : ''
       await addLog(
-        'supervisor',
+        'orchestrator',
         'error',
         `Build would fail: ${bi.file} imports "${bi.importSpecifier}" but no file resolves at ${bi.resolvedAs}${suggestionHint}`,
       )
     }
     if (brokenImports.length > 20) {
-      await addLog('supervisor', 'error', `…and ${brokenImports.length - 20} more broken imports`)
+      await addLog('orchestrator', 'error', `…and ${brokenImports.length - 20} more broken imports`)
     }
   }
 
   if (validationIssues.length > 0) {
-    await addLog('supervisor', 'warn', `Validation: ${validationIssues.join('; ')}`)
+    await addLog('orchestrator', 'warn', `Validation: ${validationIssues.join('; ')}`)
   } else {
-    await addLog('supervisor', 'success', `Validation passed — ${finalPaths.length} files ready`)
+    await addLog('orchestrator', 'success', `Validation passed — ${finalPaths.length} files ready`)
   }
 
   // ── IMPORT FIX CYCLE: Send broken imports back to Frontend for fixing ──
@@ -1271,7 +1355,7 @@ async function runPipeline(
 
   while (brokenImports.length > 0 && importFixCycle < MAX_IMPORT_FIX_CYCLES) {
     importFixCycle++
-    await addLog('supervisor', 'info', `Import fix cycle ${importFixCycle}/${MAX_IMPORT_FIX_CYCLES} — ${brokenImports.length} broken imports`)
+    await addLog('orchestrator', 'info', `Import fix cycle ${importFixCycle}/${MAX_IMPORT_FIX_CYCLES} — ${brokenImports.length} broken imports`)
 
     // Group broken imports by the agent that owns the importing file
     const fixByAgent = new Map<string, BrokenImport[]>()
@@ -1322,7 +1406,7 @@ RULES:
 - If a file is missing, create it with complete implementation
 - Do NOT change any other code — only fix imports or create missing files`
 
-      await addLog('supervisor', 'delegate', `→ ${agentId}: Fix ${issues.length} broken imports`)
+      await addLog('orchestrator', 'delegate', `→ ${agentId}: Fix ${issues.length} broken imports`)
       dispatch({ type: 'UPDATE_AGENT', id: agentId, data: { status: 'working', currentTask: `Fixing ${issues.length} broken imports` } })
 
       const fixResult = await callAgent(agentId, fixPrompt)
@@ -1362,9 +1446,9 @@ RULES:
     }
 
     if (brokenImports.length === 0) {
-      await addLog('supervisor', 'success', `All imports resolved after fix cycle ${importFixCycle}`)
+      await addLog('orchestrator', 'success', `All imports resolved after fix cycle ${importFixCycle}`)
     } else {
-      await addLog('supervisor', 'warn', `${brokenImports.length} broken imports remain after fix cycle ${importFixCycle}`)
+      await addLog('orchestrator', 'warn', `${brokenImports.length} broken imports remain after fix cycle ${importFixCycle}`)
     }
   }
 
@@ -1372,18 +1456,18 @@ RULES:
   const pushBlocked = brokenImports.length > 0
 
   if (pushBlocked) {
-    await addLog('supervisor', 'error', `Push BLOCKED — ${brokenImports.length} unresolved imports would cause build failure`)
+    await addLog('orchestrator', 'error', `Push BLOCKED — ${brokenImports.length} unresolved imports would cause build failure`)
     for (const bi of brokenImports.slice(0, 10)) {
-      await addLog('supervisor', 'error', `  ✗ ${bi.file} → "${bi.importSpecifier}" (not found)`)
+      await addLog('orchestrator', 'error', `  ✗ ${bi.file} → "${bi.importSpecifier}" (not found)`)
     }
   }
 
   dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: pushBlocked ? 'error' : 'done' } })
-  dispatch({ type: 'UPDATE_AGENT', id: 'supervisor', data: { status: pushBlocked ? 'error' : 'done' } })
+  dispatch({ type: 'UPDATE_AGENT', id: 'orchestrator', data: { status: pushBlocked ? 'error' : 'done' } })
 
   const finalPathsUpdated = Object.keys(finalFiles)
   dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: pushBlocked ? 'error' : 'completed', result: pushBlocked ? `Blocked: ${brokenImports.length} unresolved imports` : `Generated ${finalPathsUpdated.length}/${totalExpected} files` } })
-  await addLog('supervisor', pushBlocked ? 'error' : 'success', pushBlocked ? `Task blocked — ${brokenImports.length} broken imports prevent push` : `Task complete — ${finalPathsUpdated.length}/${totalExpected} files generated`)
+  await addLog('orchestrator', pushBlocked ? 'error' : 'success', pushBlocked ? `Task blocked — ${brokenImports.length} broken imports prevent push` : `Task complete — ${finalPathsUpdated.length}/${totalExpected} files generated`)
 
   await fetch('/api/tasks/' + taskId, {
     method: 'PATCH',
@@ -1409,7 +1493,7 @@ RULES:
   let buildPassed = false
 
   for (let buildAttempt = 1; buildAttempt <= MAX_BUILD_FIX_ATTEMPTS; buildAttempt++) {
-    await addLog('supervisor', 'info', `Build check ${buildAttempt}/${MAX_BUILD_FIX_ATTEMPTS} — running npm install && npm run build…`)
+    await addLog('orchestrator', 'info', `Build check ${buildAttempt}/${MAX_BUILD_FIX_ATTEMPTS} — running npm install && npm run build…`)
 
     try {
       const buildRes = await fetch('/api/build-check', {
@@ -1422,22 +1506,22 @@ RULES:
       const buildData = await buildRes.json() as { ok: boolean; phase?: string; error?: string }
 
       if (buildData.ok) {
-        await addLog('supervisor', 'success', `Build passed on attempt ${buildAttempt}`)
+        await addLog('orchestrator', 'success', `Build passed on attempt ${buildAttempt}`)
         buildPassed = true
         break
       }
 
       // Build failed — log the error
       const errorPreview = (buildData.error ?? 'Unknown build error').slice(0, 1500)
-      await addLog('supervisor', 'error', `Build FAILED (${buildData.phase}): ${errorPreview}`)
+      await addLog('orchestrator', 'error', `Build FAILED (${buildData.phase}): ${errorPreview}`)
 
       if (buildAttempt >= MAX_BUILD_FIX_ATTEMPTS) {
-        await addLog('supervisor', 'error', `Build failed after ${MAX_BUILD_FIX_ATTEMPTS} attempts — push BLOCKED`)
+        await addLog('orchestrator', 'error', `Build failed after ${MAX_BUILD_FIX_ATTEMPTS} attempts — push BLOCKED`)
         break
       }
 
       // Send error to Frontend agent for fixing
-      await addLog('supervisor', 'delegate', `→ frontend: Fix build error (attempt ${buildAttempt})`)
+      await addLog('orchestrator', 'delegate', `→ frontend: Fix build error (attempt ${buildAttempt})`)
       dispatch({ type: 'UPDATE_AGENT', id: 'frontend', data: { status: 'working', currentTask: `Fixing build error (attempt ${buildAttempt})` } })
 
       const buildFixPrompt = `BUILD FAILED — The project does not compile. Fix the errors and return ONLY the corrected files.
@@ -1480,16 +1564,16 @@ RULES:
       dispatch({ type: 'UPDATE_AGENT', id: 'frontend', data: { status: 'done', currentTask: null } })
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
-      await addLog('supervisor', 'warn', `Build check error: ${msg}`)
+      await addLog('orchestrator', 'warn', `Build check error: ${msg}`)
       // If the build-check endpoint itself fails, skip the gate rather than block forever
-      await addLog('supervisor', 'warn', 'Build check endpoint unavailable — proceeding with push')
+      await addLog('orchestrator', 'warn', 'Build check endpoint unavailable — proceeding with push')
       buildPassed = true
       break
     }
   }
 
   if (!buildPassed) {
-    await addLog('supervisor', 'error', `Push BLOCKED — build fails after ${MAX_BUILD_FIX_ATTEMPTS} fix attempts`)
+    await addLog('orchestrator', 'error', `Push BLOCKED — build fails after ${MAX_BUILD_FIX_ATTEMPTS} fix attempts`)
     dispatch({ type: 'UPDATE_PIPELINE_STEP', stepId: 'deliver', data: { status: 'error' } })
     dispatch({ type: 'UPDATE_TASK', id: taskId, data: { status: 'error', result: 'Build failed — code does not compile' } })
     dispatch({ type: 'SET_TAB', tab: 'logs' })
@@ -1500,7 +1584,7 @@ RULES:
   // ── AUTO-PUSH: Send all generated files to GitHub ────────────────────
   const finalPathsAfterBuildFix = Object.keys(finalFiles)
   try {
-    await addLog('supervisor', 'info', `Pushing ${finalPathsAfterBuildFix.length} files to GitHub…`)
+    await addLog('orchestrator', 'info', `Pushing ${finalPathsAfterBuildFix.length} files to GitHub…`)
     const pushRes = await fetch('/api/github/push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1524,19 +1608,19 @@ RULES:
     if (pushData.ok && !pushData.skipped) {
       const initNote = pushData.isInitialCommit ? ' (initial commit + scaffolding)' : ''
       await addLog(
-        'supervisor',
+        'orchestrator',
         'success',
         `Pushed ${pushData.filesCount} files${initNote} · ${pushData.commitSha} — ${pushData.commitUrl}`,
       )
-      await addLog('supervisor', 'info', 'Railway will auto-deploy in ~2 minutes')
+      await addLog('orchestrator', 'info', 'Railway will auto-deploy in ~2 minutes')
     } else if (pushData.skipped) {
-      await addLog('supervisor', 'info', 'GitHub push skipped — no files and repo already initialized')
+      await addLog('orchestrator', 'info', 'GitHub push skipped — no files and repo already initialized')
     } else {
-      await addLog('supervisor', 'warn', `GitHub push failed: ${pushData.error}`)
+      await addLog('orchestrator', 'warn', `GitHub push failed: ${pushData.error}`)
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
-    await addLog('supervisor', 'warn', `GitHub push failed: ${msg}`)
+    await addLog('orchestrator', 'warn', `GitHub push failed: ${msg}`)
   }
 
   dispatch({ type: 'SET_TAB', tab: 'summary' })
@@ -1710,7 +1794,7 @@ export default function App() {
       if (outputs.length === 0) return
     }
     setIsPushing(true)
-    dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'info', message: 'Manual GitHub push triggered…' } })
+    dispatch({ type: 'ADD_LOG', log: { agent: 'orchestrator', type: 'info', message: 'Manual GitHub push triggered…' } })
     try {
       const taskTitle = state.tasks[0]?.title ?? 'manual push'
       const body = fileEntries.length > 0
@@ -1728,17 +1812,17 @@ export default function App() {
       }
       if (data.ok && !data.skipped) {
         const initNote = data.isInitialCommit ? ' (initial commit with scaffolding)' : ''
-        dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'success', message: `Pushed ${data.filesCount} files${initNote} · ${data.commitSha} — ${data.commitUrl}` } })
-        dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'info', message: '🚀 Railway will auto-deploy in ~2 minutes' } })
+        dispatch({ type: 'ADD_LOG', log: { agent: 'orchestrator', type: 'success', message: `Pushed ${data.filesCount} files${initNote} · ${data.commitSha} — ${data.commitUrl}` } })
+        dispatch({ type: 'ADD_LOG', log: { agent: 'orchestrator', type: 'info', message: '🚀 Railway will auto-deploy in ~2 minutes' } })
         dispatch({ type: 'SET_TAB', tab: 'logs' })
       } else if (data.skipped) {
-        dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'info', message: 'GitHub push: no file blocks detected in output' } })
+        dispatch({ type: 'ADD_LOG', log: { agent: 'orchestrator', type: 'info', message: 'GitHub push: no file blocks detected in output' } })
       } else {
-        dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'error', message: `GitHub push failed: ${data.error}` } })
+        dispatch({ type: 'ADD_LOG', log: { agent: 'orchestrator', type: 'error', message: `GitHub push failed: ${data.error}` } })
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown'
-      dispatch({ type: 'ADD_LOG', log: { agent: 'supervisor', type: 'error', message: `GitHub push error: ${msg}` } })
+      dispatch({ type: 'ADD_LOG', log: { agent: 'orchestrator', type: 'error', message: `GitHub push error: ${msg}` } })
     } finally {
       setIsPushing(false)
     }
@@ -1882,8 +1966,8 @@ export default function App() {
         {/* ── Stats bar ───────────────────────────────────────────── */}
         <div style={{ display: 'flex', gap: 10, padding: '14px 0' }}>
           {[
-            { label: 'Active', value: `${activeCount}/6`, color: '#7c6ef6' },
-            { label: 'Done', value: `${doneCount}/6`, color: '#10b981' },
+            { label: 'Active', value: `${activeCount}/${AGENTS.length}`, color: '#7c6ef6' },
+            { label: 'Done', value: `${doneCount}/${AGENTS.length}`, color: '#10b981' },
             { label: 'Tasks', value: String(state.tasks.length), color: '#e8608c' },
             { label: 'Cost', value: `$${totalCost.toFixed(4)}`, color: '#f5b731' },
           ].map((s, i) => (
@@ -1910,25 +1994,52 @@ export default function App() {
           ))}
         </div>
 
-        {/* ── Agent Cards ─────────────────────────────────────────── */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(6, 1fr)',
-          gap: 10,
-          padding: '2px 0 14px',
-        }}>
-          {AGENTS.map(a => (
-            <AgentCard key={a.id} agent={a} state={state.agents[a.id]} />
-          ))}
+        {/* ── Agent Stage — 4 Divisions ──────────────────────────── */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '2px 0 14px' }}>
+          {/* Command Division — full width top row */}
+          <DivisionGroup
+            division="command"
+            label="Command"
+            agents={AGENTS.filter(a => a.division === 'command')}
+            agentStates={state.agents}
+            color="#7c6ef6"
+          />
+
+          {/* Design | Engineering | Testing — responsive columns */}
+          <div className="division-columns">
+            <DivisionGroup
+              division="design"
+              label="Design"
+              agents={AGENTS.filter(a => a.division === 'design')}
+              agentStates={state.agents}
+              color="#ec4899"
+            />
+            <DivisionGroup
+              division="engineering"
+              label="Engineering"
+              agents={AGENTS.filter(a => a.division === 'engineering')}
+              agentStates={state.agents}
+              color="#2dd4a8"
+            />
+            <DivisionGroup
+              division="testing"
+              label="Testing"
+              agents={AGENTS.filter(a => a.division === 'testing')}
+              agentStates={state.agents}
+              color="#f5b731"
+            />
+          </div>
         </div>
 
         {/* ── Pipeline ────────────────────────────────────────────── */}
         {state.pipeline && (
-          <PipelineViz
-            steps={state.pipeline}
-            agents={AGENTS}
-            taskTitle={state.tasks[0]?.title}
-          />
+          <div className="pipeline-scroll">
+            <PipelineViz
+              steps={state.pipeline}
+              agents={AGENTS}
+              taskTitle={state.tasks[0]?.title}
+            />
+          </div>
         )}
 
         {/* ── Main panel ──────────────────────────────────────────── */}
@@ -2032,7 +2143,7 @@ export default function App() {
           fontSize: 9.5,
           color: '#1f2937',
         }}>
-          <span>6 agents · Supervisor pattern · Anthropic API · Socket.io · Prisma SQLite</span>
+          <span>12 agents · 4 divisions · Orchestrator pattern · Anthropic API · Socket.io · Prisma SQLite</span>
           <span>claude-sonnet-4-6 + claude-opus-4-6</span>
         </div>
       </div>

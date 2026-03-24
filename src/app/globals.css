@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400;1,500&family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400;1,500&family=Inter:wght@300;400;500;600;700;800&family=Press+Start+2P&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -98,4 +98,99 @@ textarea:focus {
 
 .animate-spin {
   animation: spin 0.8s linear infinite;
+}
+
+/* ── Pixel art agent animations ─────────────────────────────── */
+
+@keyframes pixelBounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+@keyframes pixelWork {
+  0%, 100% { transform: translateY(0) scaleX(1); }
+  25% { transform: translateY(-2px) scaleX(1.02); }
+  75% { transform: translateY(0) scaleX(0.98); }
+}
+
+@keyframes pixelMeeting {
+  0%, 100% { transform: translateX(0); }
+  33% { transform: translateX(2px); }
+  66% { transform: translateX(-2px); }
+}
+
+@keyframes pixelHandoff {
+  0% { transform: translateX(0); opacity: 1; }
+  50% { transform: translateX(4px); opacity: 0.6; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes pixelError {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(2px); }
+  60% { transform: translateX(-1px); }
+  80% { transform: translateX(1px); }
+}
+
+@keyframes pixelDone {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+@keyframes speechBubbleIn {
+  0% { opacity: 0; transform: scale(0.8) translateY(4px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes speechDots {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
+
+.pixel-bounce { animation: pixelBounce 1s ease-in-out infinite; }
+.pixel-work { animation: pixelWork 0.8s ease-in-out infinite; }
+.pixel-meeting { animation: pixelMeeting 0.6s ease-in-out infinite; }
+.pixel-handoff { animation: pixelHandoff 1.2s ease-in-out infinite; }
+.pixel-error { animation: pixelError 0.4s ease-in-out 3; }
+.pixel-done { animation: pixelDone 0.5s ease-out 1; }
+.speech-bubble-in { animation: speechBubbleIn 0.25s ease-out forwards; }
+
+/* Press Start 2P utility */
+.font-pixel {
+  font-family: 'Press Start 2P', monospace;
+}
+
+/* ── Responsive division grid ───────────────────────────────── */
+
+.division-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+/* Tablet: 2 columns */
+@media (max-width: 1024px) {
+  .division-columns {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* Mobile: single column */
+@media (max-width: 640px) {
+  .division-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Pipeline overflow scroll on mobile */
+@media (max-width: 768px) {
+  .pipeline-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .pipeline-scroll > div {
+    min-width: 600px;
+  }
 }

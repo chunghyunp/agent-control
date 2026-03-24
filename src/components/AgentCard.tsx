@@ -2,6 +2,18 @@
 
 import { useEffect, useState } from 'react'
 import type { AgentDef, AgentState } from '@/types'
+import PixelAvatar from './PixelAvatar'
+import SpeechBubble from './SpeechBubble'
+
+const STATUS_ANIM: Record<string, string> = {
+  working: 'pixel-work',
+  reviewing: 'pixel-work',
+  meeting: 'pixel-meeting',
+  handoff: 'pixel-handoff',
+  error: 'pixel-error',
+  done: 'pixel-done',
+  waiting: 'pixel-bounce',
+}
 
 interface AgentCardProps {
   agent: AgentDef
@@ -21,6 +33,8 @@ const STATUS_STYLES: Record<string, {
   done: { label: 'Complete', bg: 'rgba(16,185,129,0.1)', text: '#34d399', dot: '#10b981', glow: 'none' },
   error: { label: 'Error', bg: 'rgba(239,68,68,0.1)', text: '#f87171', dot: '#ef4444', glow: '0 0 10px rgba(239,68,68,0.35)' },
   reviewing: { label: 'Reviewing', bg: 'rgba(245,183,49,0.1)', text: '#fbbf24', dot: '#f59e0b', glow: '0 0 10px rgba(245,183,49,0.2)' },
+  meeting: { label: 'Meeting', bg: 'rgba(124,110,246,0.1)', text: '#c4b5fd', dot: '#8b5cf6', glow: '0 0 10px rgba(139,92,246,0.3)' },
+  handoff: { label: 'Handoff', bg: 'rgba(45,212,168,0.1)', text: '#5eead4', dot: '#14b8a6', glow: '0 0 8px rgba(20,184,166,0.3)' },
 }
 
 export default function AgentCard({ agent, state }: AgentCardProps) {
@@ -66,22 +80,25 @@ export default function AgentCard({ agent, state }: AgentCardProps) {
       {/* Header row */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{
-            width: 36,
-            height: 36,
-            borderRadius: 10,
-            background: `${agent.color}10`,
-            border: `1px solid ${agent.color}20`,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: 18,
-            flexShrink: 0,
-          }}>
-            {agent.icon}
+          <div
+            className={STATUS_ANIM[state.status] ?? ''}
+            style={{
+              width: 40,
+              height: 44,
+              borderRadius: 8,
+              background: `${agent.color}08`,
+              border: `1px solid ${agent.color}15`,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+              overflow: 'hidden',
+            }}
+          >
+            <PixelAvatar agentId={agent.id} />
           </div>
           <div>
-            <div style={{ fontWeight: 650, fontSize: 13, color: '#d1d5db', letterSpacing: '-0.01em' }}>
+            <div style={{ fontWeight: 650, fontSize: 8, color: '#d1d5db', letterSpacing: '0.02em', fontFamily: '"Press Start 2P", monospace' }}>
               {agent.name}
             </div>
             <div style={{ fontSize: 9.5, color: '#4b5563', marginTop: 1.5, letterSpacing: '0.02em' }}>
@@ -115,19 +132,9 @@ export default function AgentCard({ agent, state }: AgentCardProps) {
         </div>
       </div>
 
-      {/* Current task label */}
-      {state.currentTask && (isActive || state.status === 'reviewing') && (
-        <div style={{
-          marginTop: 6,
-          fontSize: 9,
-          color: '#4b5563',
-          fontFamily: '"DM Mono", monospace',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
-          {state.currentTask}
-        </div>
+      {/* Speech bubble — shows current task */}
+      {state.currentTask && (isActive || state.status === 'reviewing' || state.status === 'meeting' || state.status === 'handoff') && (
+        <SpeechBubble text={state.currentTask} color={agent.color} />
       )}
 
       {/* Progress bar — only when working */}

@@ -1,6 +1,7 @@
 'use client'
 
 import type { PipelineStep, AgentDef } from '@/types'
+import PixelAvatar from './PixelAvatar'
 
 interface PipelineVizProps {
   steps: PipelineStep[]
@@ -71,7 +72,7 @@ export default function PipelineViz({ steps, agents, taskTitle }: PipelineVizPro
                   animation: isActive ? 'pulseGlow 2s infinite' : undefined,
                   transition: 'all 0.4s ease',
                 }}>
-                  {isDone ? '✓' : isError ? '✕' : (agent?.icon ?? '●')}
+                  {isDone ? '✓' : isError ? '✕' : (agent ? <PixelAvatar agentId={agent.id} size={20} /> : '●')}
                 </div>
                 {/* Label */}
                 <span style={{ fontSize: 9, color: s.text, fontWeight: 500, letterSpacing: '0.03em', textAlign: 'center' }}>
