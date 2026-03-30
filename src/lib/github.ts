@@ -11,6 +11,136 @@ export interface PushResult {
   filesCount: number
 }
 
+export interface CommitResult {
+  commitSha: string
+  commitUrl: string
+  fileUrl: string
+}
+
+/**
+ * Create a new branch from an existing base branch.
+ * Returns the SHA of the branch tip.
+ */
+export async function createBranch(
+  token: string,
+  owner: string,
+  repo: string,
+  baseBranch: string,
+  newBranch: string,
+): Promise<{ sha: string }> {
+  const octokit = new Octokit({ auth: token })
+
+  // Check if branch already exists
+  try {
+    const { data: ref } = await octokit.git.getRef({ owner, repo, ref: `heads/${newBranch}` })
+    return { sha: ref.object.sha }
+  } catch {
+    // Branch doesn't exist — create it
+  }
+
+  // Get base branch SHA
+  const { data: baseRef } = await octokit.git.getRef({ owner, repo, ref: `heads/${baseBranch}` })
+  const baseSha = baseRef.object.sha
+
+  await octokit.git.createRef({
+    owner,
+    repo,
+    ref: `refs/heads/${newBranch}`,
+    sha: baseSha,
+  })
+
+  return { sha: baseSha }
+}
+
+/**
+ * Commit a single file to a branch using the GitHub Contents API.
+ * Creates or updates the file. Returns commit info and file URL.
+ */
+export async function commitFile(
+  token: string,
+  owner: string,
+  repo: string,
+  branch: string,
+  filePath: string,
+  content: string,
+  message: string,
+  authorName = 'HYPAI Agent',
+  authorEmail = 'agent@hypaikorea.com',
+): Promise<CommitResult> {
+  const octokit = new Octokit({ auth: token })
+
+  // Check if file already exists (need SHA for update)
+  let existingSha: string | undefined
+  try {
+    const { data } = await octokit.repos.getContent({
+      owner,
+      repo,
+      path: filePath,
+      ref: branch,
+    })
+    if (!Array.isArray(data) && data.type === 'file') {
+      existingSha = data.sha
+    }
+  } catch {
+    // File doesn't exist yet — that's fine
+  }
+
+  const { data } = await octokit.repos.createOrUpdateFileContents({
+    owner,
+    repo,
+    path: filePath,
+    message,
+    content: Buffer.from(content).toString('base64'),
+    branch,
+    ...(existingSha ? { sha: existingSha } : {}),
+    committer: { name: authorName, email: authorEmail },
+    author: { name: authorName, email: authorEmail },
+  })
+
+  return {
+    commitSha: data.commit.sha?.slice(0, 7) ?? '',
+    commitUrl: data.commit.html_url ?? `https://github.com/${owner}/${repo}/commit/${data.commit.sha}`,
+    fileUrl: `https://github.com/${owner}/${repo}/blob/${branch}/${filePath}`,
+  }
+}
+
+/**
+ * Fetch file content from a GitHub repo.
+ */
+export async function fetchFileContent(
+  token: string,
+  owner: string,
+  repo: string,
+  branch: string,
+  filePath: string,
+): Promise<{ content: string; sha: string }> {
+  const octokit = new Octokit({ auth: token })
+  const { data } = await octokit.repos.getContent({
+    owner,
+    repo,
+    path: filePath,
+    ref: branch,
+  })
+  if (Array.isArray(data) || data.type !== 'file') {
+    throw new Error('Not a file')
+  }
+  const content = Buffer.from(data.content, 'base64').toString('utf-8')
+  return { content, sha: data.sha }
+}
+
+/**
+ * Generate a branch name slug from a task ID and title.
+ */
+export function makeBranchName(taskId: string, title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40)
+  return `agent/task-${taskId}-${slug}`
+}
+
 /**
  * Parse agent outputs for FILE delimiter blocks:
  *

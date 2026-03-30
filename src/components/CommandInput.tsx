@@ -10,6 +10,7 @@ interface AttachedFile {
 interface RepoOverride {
   owner: string
   repo: string
+  branch?: string
 }
 
 interface CommandInputProps {

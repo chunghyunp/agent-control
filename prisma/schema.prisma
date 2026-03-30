@@ -8,15 +8,22 @@ generator client {
 }
 
 model Task {
-  id        String   @id
-  title     String
-  status    String   @default("pending")
-  result    String?
-  pipeline  String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  logs      Log[]
-  costs     AgentCost[]
+  id          String    @id
+  title       String
+  prompt      String?
+  status      String    @default("pending")
+  result      String?
+  pipeline    String?
+  repoTarget  String?
+  branch      String?
+  completedAt DateTime?
+  totalCost   Float     @default(0)
+  agentCount  Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  logs        Log[]
+  costs       AgentCost[]
+  files       TaskFile[]
 }
 
 model Log {
@@ -26,7 +33,7 @@ model Log {
   type      String
   message   String
   createdAt DateTime @default(now())
-  task      Task     @relation(fields: [taskId], references: [id])
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
 }
 
 model AgentCost {
@@ -36,8 +43,20 @@ model AgentCost {
   inputTokens  Int    @default(0)
   outputTokens Int    @default(0)
   costUsd      Float  @default(0)
-  task         Task   @relation(fields: [taskId], references: [id])
+  task         Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
   @@unique([taskId, agent])
+}
+
+model TaskFile {
+  id        Int      @id @default(autoincrement())
+  taskId    String
+  path      String
+  content   String
+  githubUrl String?
+  agentName String?
+  createdAt DateTime @default(now())
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  @@unique([taskId, path])
 }
 
 model Settings {

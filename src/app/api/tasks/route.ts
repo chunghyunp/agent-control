@@ -14,11 +14,17 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { id, title } = body as { id: string; title: string }
+    const { id, title, prompt, repoTarget, branch } = body as {
+      id: string
+      title: string
+      prompt?: string
+      repoTarget?: string
+      branch?: string
+    }
     if (!id || !title) {
       return NextResponse.json({ error: 'id and title are required' }, { status: 400 })
     }
-    const task = await createTask(id, title)
+    const task = await createTask(id, title, { prompt, repoTarget, branch })
     return NextResponse.json(task, { status: 201 })
   } catch (err) {
     console.error('[POST /api/tasks]', err)

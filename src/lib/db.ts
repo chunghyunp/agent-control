@@ -9,12 +9,35 @@ export async function initDb() {
   console.log('[DB] Connected')
 }
 
-export async function createTask(id: string, title: string) {
-  return prisma.task.create({ data: { id, title } })
+export async function createTask(
+  id: string,
+  title: string,
+  opts?: { prompt?: string; repoTarget?: string; branch?: string }
+) {
+  return prisma.task.create({
+    data: {
+      id,
+      title,
+      prompt: opts?.prompt,
+      repoTarget: opts?.repoTarget,
+      branch: opts?.branch,
+    },
+  })
 }
 
 export async function updateTaskStatus(id: string, status: string, result?: string) {
-  return prisma.task.update({ where: { id }, data: { status, result } })
+  const data: Record<string, unknown> = { status, result }
+  if (status === 'completed' || status === 'error') {
+    data.completedAt = new Date()
+  }
+  return prisma.task.update({ where: { id }, data })
+}
+
+export async function updateTaskMeta(
+  id: string,
+  data: { totalCost?: number; agentCount?: number; branch?: string; repoTarget?: string }
+) {
+  return prisma.task.update({ where: { id }, data })
 }
 
 export async function updateTaskPipeline(id: string, pipeline: string) {
@@ -40,7 +63,7 @@ export async function upsertCost(
 }
 
 export async function getTasks() {
-  return prisma.task.findMany({ orderBy: { createdAt: 'desc' }, take: 20 })
+  return prisma.task.findMany({ orderBy: { createdAt: 'desc' }, take: 50 })
 }
 
 export async function getLogs(taskId: string) {
@@ -49,4 +72,55 @@ export async function getLogs(taskId: string) {
 
 export async function getCosts(taskId: string) {
   return prisma.agentCost.findMany({ where: { taskId } })
+}
+
+export async function saveTaskFiles(taskId: string, files: Record<string, string>, agentName?: string) {
+  const ops = Object.entries(files).map(([path, content]) =>
+    prisma.taskFile.upsert({
+      where: { taskId_path: { taskId, path } },
+      update: { content, ...(agentName ? { agentName } : {}) },
+      create: { taskId, path, content, agentName },
+    })
+  )
+  return prisma.$transaction(ops)
+}
+
+export async function saveTaskFileWithGithub(
+  taskId: string,
+  path: string,
+  content: string,
+  githubUrl: string,
+  agentName?: string
+) {
+  return prisma.taskFile.upsert({
+    where: { taskId_path: { taskId, path } },
+    update: { content, githubUrl, ...(agentName ? { agentName } : {}) },
+    create: { taskId, path, content, githubUrl, agentName },
+  })
+}
+
+export async function getTaskFiles(taskId: string) {
+  return prisma.taskFile.findMany({ where: { taskId }, orderBy: { path: 'asc' } })
+}
+
+export async function getTaskWithDetails(taskId: string) {
+  return prisma.task.findUnique({
+    where: { id: taskId },
+    include: { files: { orderBy: { path: 'asc' } }, logs: { orderBy: { createdAt: 'asc' } }, costs: true },
+  })
+}
+
+export async function deleteTask(taskId: string) {
+  return prisma.task.delete({ where: { id: taskId } })
+}
+
+export async function getAllFiles() {
+  return prisma.taskFile.findMany({
+    orderBy: { createdAt: 'desc' },
+    include: { task: { select: { id: true, title: true, status: true, createdAt: true } } },
+  })
+}
+
+export async function getFileById(id: number) {
+  return prisma.taskFile.findUnique({ where: { id } })
 }

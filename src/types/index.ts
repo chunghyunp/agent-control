@@ -45,12 +45,28 @@ export interface CostEntry {
   costUsd: number
 }
 
+export interface TaskFile {
+  id: number
+  path: string
+  content: string
+  githubUrl?: string | null
+  agentName?: string | null
+  createdAt: string
+}
+
 export interface Task {
   id: string
   title: string
+  prompt?: string
   status: 'pending' | 'active' | 'completed' | 'error'
   result?: string
+  repoTarget?: string
+  branch?: string
+  totalCost?: number
+  agentCount?: number
   created: string
+  completedAt?: string
+  files?: TaskFile[]
 }
 
 export interface AppState {
@@ -62,7 +78,7 @@ export interface AppState {
   costs: Record<string, CostEntry>
   isRunning: boolean
   taskInput: string
-  tab: 'summary' | 'logs' | 'files' | 'costs' | 'tasks'
+  tab: 'summary' | 'logs' | 'files' | 'costs' | 'tasks' | 'history'
   parsedFiles: Record<string, string>  // path -> content, merged across all agents
   totalExpectedFiles: number
 }
@@ -84,4 +100,5 @@ export type AppAction =
   | { type: 'MERGE_PARSED_FILES'; files: Record<string, string> }
   | { type: 'SET_TASK_INPUT'; value: string }
   | { type: 'LOAD_TASKS'; tasks: Task[] }
+  | { type: 'DELETE_TASK'; id: string }
   | { type: 'SET_TOTAL_EXPECTED'; count: number }

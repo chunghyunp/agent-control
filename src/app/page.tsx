@@ -230,6 +230,9 @@ function reducer(state: AppState, action: AppAction): AppState {
     case 'LOAD_TASKS':
       return { ...state, tasks: action.tasks }
 
+    case 'DELETE_TASK':
+      return { ...state, tasks: state.tasks.filter(t => t.id !== action.id) }
+
     default:
       return state
   }
@@ -862,16 +865,53 @@ async function runPipeline(
   const taskId = String(Date.now())
   const now = new Date().toLocaleTimeString('en', { hour12: false })
 
+  // Determine repo target string for DB
+  const repoTargetStr = repoOverride ? `${repoOverride.owner}/${repoOverride.repo}` : undefined
+
+  // Generate branch name for this task
+  const slug = taskDescription.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
+  const taskBranch = `agent/task-${taskId}-${slug}`
+
   await fetch('/api/tasks', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: taskId, title: taskDescription }),
+    body: JSON.stringify({
+      id: taskId,
+      title: taskDescription,
+      prompt: taskDescription,
+      repoTarget: repoTargetStr,
+      branch: taskBranch,
+    }),
   }).catch(() => null)
 
   dispatch({
     type: 'ADD_TASK',
-    task: { id: taskId, title: taskDescription, status: 'active', created: now },
+    task: {
+      id: taskId,
+      title: taskDescription,
+      status: 'active',
+      created: now,
+      repoTarget: repoTargetStr,
+      branch: taskBranch,
+    },
   })
+
+  // Try to create a dedicated branch for this task
+  let branchReady = false
+  try {
+    const branchRes = await fetch('/api/github/create-branch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        repo: repoTargetStr,
+        newBranch: taskBranch,
+      }),
+    })
+    const branchData = await branchRes.json() as { ok: boolean; error?: string }
+    branchReady = branchData.ok === true
+  } catch {
+    // Branch creation failed — we'll fall back to bulk push at end
+  }
 
   const addLog = async (agent: string, type: LogEntry['type'], message: string) => {
     dispatch({ type: 'ADD_LOG', log: { agent, type, message } })
@@ -1213,8 +1253,49 @@ async function runPipeline(
       }))
 
       // Merge all agent results after parallel execution completes (no race condition)
-      for (const newFiles of agentResults) {
+      const agentEntries = [...agentMap.entries()]
+      for (let idx = 0; idx < agentResults.length; idx++) {
+        const newFiles = agentResults[idx]
+        const agentId = agentEntries[idx][0]
         Object.assign(generatedFiles, newFiles)
+
+        // Per-agent GitHub commit: commit each agent's files to the task branch
+        if (branchReady && Object.keys(newFiles).length > 0) {
+          const agentLabel = AGENTS.find(a => a.id === agentId)?.name ?? agentId
+          const filePaths = Object.keys(newFiles)
+          const shortDesc = filePaths.length <= 3
+            ? filePaths.map(p => p.split('/').pop()).join(', ')
+            : `${filePaths.length} files`
+
+          fetch('/api/github/push', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              files: filePaths.map(p => ({ path: p, content: newFiles[p] })),
+              message: `[Agent Control] ${agentLabel}: ${shortDesc}`,
+              ...(repoOverride && { owner: repoOverride.owner, repo: repoOverride.repo }),
+            }),
+          })
+            .then(r => r.json())
+            .then((data: { ok: boolean; commitSha?: string; commitUrl?: string }) => {
+              if (data.ok) {
+                // Save file records with GitHub URLs
+                for (const p of filePaths) {
+                  const fileUrl = data.commitUrl
+                    ? data.commitUrl.replace('/commit/', `/blob/${taskBranch}/`).replace(/\/[a-f0-9]+$/, `/${p}`)
+                    : undefined
+                  if (fileUrl) {
+                    fetch('/api/tasks/' + taskId + '/save', {
+                      method: 'POST',
+                      headers: { 'content-type': 'application/json' },
+                      body: JSON.stringify({ files: { [p]: newFiles[p] } }),
+                    }).catch(() => null)
+                  }
+                }
+              }
+            })
+            .catch(() => null)
+        }
       }
       dispatch({ type: 'MERGE_PARSED_FILES', files: generatedFiles })
 
@@ -1873,6 +1954,15 @@ RULES:
     body: JSON.stringify({ status: pushBlocked ? 'error' : 'completed', result: pushBlocked ? `Blocked: ${brokenImports.length} unresolved imports` : planResult.text.slice(0, 2000) }),
   }).catch(() => null)
 
+  // Persist generated files to DB
+  if (Object.keys(finalFiles).length > 0) {
+    fetch('/api/tasks/' + taskId + '/save', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ files: finalFiles }),
+    }).catch(err => console.error('[save files]', err))
+  }
+
   await fetch('/api/emit', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -1982,7 +2072,7 @@ RULES:
   // ── AUTO-PUSH: Send all generated files to GitHub ────────────────────
   const finalPathsAfterBuildFix = Object.keys(finalFiles)
   try {
-    await addLog('orchestrator', 'info', `Pushing ${finalPathsAfterBuildFix.length} files to GitHub…`)
+    await addLog('orchestrator', 'info', `Pushing ${finalPathsAfterBuildFix.length} files to GitHub (branch: ${taskBranch})…`)
     const pushRes = await fetch('/api/github/push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2010,7 +2100,7 @@ RULES:
         'success',
         `Pushed ${pushData.filesCount} files${initNote} · ${pushData.commitSha} — ${pushData.commitUrl}`,
       )
-      await addLog('orchestrator', 'info', 'Railway will auto-deploy in ~2 minutes')
+      await addLog('orchestrator', 'info', `Branch: ${taskBranch} — Railway will auto-deploy in ~2 minutes`)
     } else if (pushData.skipped) {
       await addLog('orchestrator', 'info', 'GitHub push skipped — no files and repo already initialized')
     } else {
@@ -2020,6 +2110,20 @@ RULES:
     const msg = err instanceof Error ? err.message : 'Unknown error'
     await addLog('orchestrator', 'warn', `GitHub push failed: ${msg}`)
   }
+
+  // Update task meta with cost and agent count from DB
+  fetch('/api/tasks/' + taskId)
+    .then(r => r.json())
+    .then((task: { costs?: Array<{ costUsd: number }> }) => {
+      const totalCost = task.costs?.reduce((s, c) => s + c.costUsd, 0) ?? 0
+      const agentCount = task.costs?.length ?? 0
+      return fetch('/api/tasks/' + taskId, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ totalCost, agentCount }),
+      })
+    })
+    .catch(() => null)
 
   dispatch({ type: 'SET_TAB', tab: 'summary' })
   dispatch({ type: 'SET_RUNNING', value: false })
@@ -2119,17 +2223,44 @@ export default function App() {
           const tasks = (data as Array<{
             id: string
             title: string
+            prompt?: string | null
             status: string
             result?: string | null
+            repoTarget?: string | null
+            branch?: string | null
+            totalCost?: number | null
+            agentCount?: number | null
             createdAt: string
+            completedAt?: string | null
           }>).map(t => ({
             id: t.id,
             title: t.title,
+            prompt: t.prompt ?? undefined,
             status: (t.status === 'completed' ? 'completed' : t.status === 'error' ? 'error' : 'pending') as Task['status'],
             result: t.result ?? undefined,
+            repoTarget: t.repoTarget ?? undefined,
+            branch: t.branch ?? undefined,
+            totalCost: t.totalCost ?? undefined,
+            agentCount: t.agentCount ?? undefined,
             created: new Date(t.createdAt).toLocaleTimeString('en', { hour12: false }),
+            completedAt: t.completedAt ?? undefined,
           }))
           dispatch({ type: 'LOAD_TASKS', tasks })
+
+          // Auto-restore files from the most recent completed task
+          const lastCompleted = tasks.find(t => t.status === 'completed')
+          if (lastCompleted) {
+            fetch('/api/tasks/' + lastCompleted.id)
+              .then(r => r.json())
+              .then((detail: { files?: Array<{ path: string; content: string }> }) => {
+                if (detail.files && detail.files.length > 0) {
+                  const restored: Record<string, string> = {}
+                  for (const f of detail.files) restored[f.path] = f.content
+                  dispatch({ type: 'MERGE_PARSED_FILES', files: restored })
+                }
+              })
+              .catch(() => null)
+          }
         }
       })
       .catch(() => null)
@@ -2242,6 +2373,7 @@ export default function App() {
     { id: 'files', label: 'Files', count: fileCount > 0 ? fileCount : undefined },
     { id: 'costs', label: 'Costs' },
     { id: 'tasks', label: 'Tasks', count: state.tasks.length },
+    { id: 'history', label: 'History', count: state.tasks.filter(t => t.status === 'completed' || t.status === 'error').length || undefined },
   ]
 
   // ── Main dashboard ───────────────────────────────────────────────
@@ -2464,7 +2596,7 @@ export default function App() {
           <div style={{
             flex: 1,
             overflow: 'hidden',
-            padding: state.tab === 'logs' || state.tab === 'summary' || state.tab === 'files' ? 0 : '14px 16px',
+            padding: state.tab === 'logs' || state.tab === 'summary' || state.tab === 'files' || state.tab === 'history' ? 0 : '14px 16px',
             display: 'flex',
             flexDirection: 'column',
           }}>
@@ -2495,6 +2627,34 @@ export default function App() {
             )}
             {state.tab === 'tasks' && (
               <TaskHistory tasks={state.tasks} />
+            )}
+            {state.tab === 'history' && (
+              <TaskHistory
+                tasks={state.tasks.filter(t => t.status === 'completed' || t.status === 'error')}
+                showGithubLinks
+                onLoadFiles={(taskId) => {
+                  fetch('/api/tasks/' + taskId)
+                    .then(r => r.json())
+                    .then((detail: { files?: Array<{ path: string; content: string }> }) => {
+                      if (detail.files && detail.files.length > 0) {
+                        const restored: Record<string, string> = {}
+                        for (const f of detail.files) restored[f.path] = f.content
+                        dispatch({ type: 'MERGE_PARSED_FILES', files: restored })
+                        dispatch({ type: 'SET_TAB', tab: 'files' })
+                      }
+                    })
+                    .catch(() => null)
+                }}
+                onDelete={(taskId) => {
+                  fetch('/api/tasks/' + taskId, { method: 'DELETE' })
+                    .then(() => dispatch({ type: 'DELETE_TASK', id: taskId }))
+                    .catch(() => null)
+                }}
+                onRerun={(title) => {
+                  dispatch({ type: 'SET_TASK_INPUT', value: title })
+                  dispatch({ type: 'SET_TAB', tab: 'summary' })
+                }}
+              />
             )}
           </div>
 
